@@ -4,7 +4,15 @@ import { timeZoneHeaders } from './timezone';
 
 export interface ChatRequest {
   model: string;
-  messages: Array<{ role: string; content: string }>;
+  messages: Array<{
+    role: string;
+    content:
+      | string
+      | Array<
+          | { type: 'text'; text: string }
+          | { type: 'image_url'; image_url: { url: string } }
+        >;
+  }>;
   stream: true;
   temperature?: number;
   max_tokens?: number;

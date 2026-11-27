@@ -1,8 +1,8 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { Send, Square, Paperclip, Search } from 'lucide-react';
+import { Send, Square, Paperclip, Search, AudioLines, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAppStore, generateId } from '../../lib/store';
-import { streamChat, streamResearch } from '../../lib/sse';
+import { streamChat, streamResearch, type ChatRequest } from '../../lib/sse';
 import { fetchSavings } from '../../lib/api';
 import { listConnectors, getSyncStatus } from '../../lib/connectors-api';
 import { serializeToolCallArguments } from '../../lib/tool-call';
@@ -13,6 +13,7 @@ import {
 } from '../../lib/chat-telemetry';
 import { MicButton } from './MicButton';
 import { useSpeech } from '../../hooks/useSpeech';
+import { useTtsStore } from '../../lib/tts';
 import type {
   ChatMessage,
   MessageTelemetry,
@@ -80,8 +81,48 @@ function useResearchCorpusSync(enabled: boolean): {
   return state;
 }
 
+interface AttachedImage {
+  id: string;
+  name: string;
+  dataUrl: string;
+}
+
+const MAX_IMAGES = 4;
+
+/** Read an image file, downscaled to at most `maxDim` px, as a JPEG data URL. */
+async function imageFileToDataUrl(file: File, maxDim = 1600): Promise<string> {
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error(`Could not read ${file.name || 'image'}`));
+      el.src = objectUrl;
+    });
+    const scale = Math.min(1, maxDim / Math.max(img.naturalWidth, img.naturalHeight));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Could not process image');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', 0.85);
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
+/** Rough check for models that can read images (cloud models and local vision models). */
+function modelSeesImages(model: string): boolean {
+  return /^(gemini|gpt-|o[134]-|claude)/.test(model) || /(vl|vision|llava|moondream|gemma3)/i.test(model);
+}
+
 export function InputArea() {
   const [input, setInput] = useState('');
+  const [attachedImages, setAttachedImages] = useState<AttachedImage[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -110,7 +151,14 @@ export function InputArea() {
     available: speechAvailable,
     startRecording,
     stopRecording,
+    cancelRecording,
+    listen,
   } = useSpeech();
+  const conversationMode = useAppStore((s) => s.conversationMode);
+  const setConversationMode = useAppStore((s) => s.setConversationMode);
+  const ttsState = useTtsStore((s) => s.state);
+  const ttsAvailable = useTtsStore((s) => s.available);
+  const autoSpokenId = useTtsStore((s) => s.autoSpokenId);
 
   // Abort in-flight stream when the user switches models mid-generation.
   // This prevents errors from trying to continue a stream with a stale model.
@@ -172,8 +220,29 @@ export function InputArea() {
     resetStream();
   }, [resetStream]);
 
-  const sendMessage = useCallback(async () => {
-    const content = input.trim();
+  const addImageFiles = useCallback(async (files: File[]) => {
+    const images = files.filter((f) => f.type.startsWith('image/'));
+    if (images.length === 0) return;
+    const room = MAX_IMAGES - attachedImages.length;
+    if (room <= 0) {
+      toast.error(`You can attach up to ${MAX_IMAGES} images per message`);
+      return;
+    }
+    const added: AttachedImage[] = [];
+    for (const file of images.slice(0, room)) {
+      try {
+        added.push({ id: generateId(), name: file.name || 'image.jpg', dataUrl: await imageFileToDataUrl(file) });
+      } catch (err: any) {
+        toast.error(err?.message || 'Could not read image');
+      }
+    }
+    if (added.length) setAttachedImages((prev) => [...prev, ...added].slice(0, MAX_IMAGES));
+  }, [attachedImages.length]);
+
+  const sendMessage = useCallback(async (spokenText?: string) => {
+    const images = attachedImages;
+    const typed = (spokenText ?? input).trim();
+    const content = typed || (images.length ? 'Please help me with the question in this image.' : '');
     if (!content || streamState.isStreaming) return;
     if (!selectedModel) {
       toast.error('Pick a model first (⌘K)');
@@ -181,6 +250,10 @@ export function InputArea() {
     }
 
     setInput('');
+    setAttachedImages([]);
+    if (images.length && !modelSeesImages(selectedModel)) {
+      toast.warning(`${selectedModel} may not be able to read images. Try gemini-2.5-flash.`);
+    }
 
     let convId = activeId;
     if (!convId) {
@@ -192,15 +265,25 @@ export function InputArea() {
       role: 'user',
       content,
       timestamp: Date.now(),
+      attachments: images.length ? images.map((img) => img.name) : undefined,
     };
     addMessage(convId, userMsg);
 
     // Build API messages before adding assistant placeholder
     const currentMessages = useAppStore.getState().messages;
-    const apiMessages = currentMessages.map((m) => ({
-      role: m.role,
-      content: m.content,
-    }));
+    // Images go only with the message they were attached to; history keeps
+    // just their names so conversations stay small in localStorage.
+    const apiMessages: ChatRequest['messages'] = currentMessages.map((m) =>
+      m.id === userMsg.id && images.length
+        ? {
+            role: m.role,
+            content: [
+              { type: 'text' as const, text: m.content },
+              ...images.map((img) => ({ type: 'image_url' as const, image_url: { url: img.dataUrl } })),
+            ],
+          }
+        : { role: m.role, content: m.content },
+    );
 
     const assistantMsg: ChatMessage = {
       id: generateId(),
@@ -533,6 +616,7 @@ export function InputArea() {
     }
   }, [
     input,
+    attachedImages,
     activeId,
     selectedModel,
     streamState.isStreaming,
@@ -545,6 +629,116 @@ export function InputArea() {
     temperature,
     maxTokens,
   ]);
+
+  // ── Conversation mode: listen → send → speak → listen again ──────────
+  const sendRef = useRef(sendMessage);
+  useEffect(() => {
+    sendRef.current = sendMessage;
+  }, [sendMessage]);
+  const conversationRef = useRef(conversationMode);
+  useEffect(() => {
+    conversationRef.current = conversationMode;
+  }, [conversationMode]);
+  const phaseRef = useRef<'idle' | 'listening' | 'waiting'>('idle');
+  const [conversationPhase, setConversationPhase] = useState<'idle' | 'listening' | 'waiting'>('idle');
+  const setPhase = useCallback((phase: 'idle' | 'listening' | 'waiting') => {
+    phaseRef.current = phase;
+    setConversationPhase(phase);
+  }, []);
+  const lastMessage = messages[messages.length - 1];
+
+  useEffect(() => {
+    if (!conversationMode) {
+      if (phaseRef.current === 'listening') cancelRecording();
+      if (phaseRef.current !== 'idle') setPhase('idle');
+      return;
+    }
+    if (phaseRef.current === 'listening') return;
+    if (phaseRef.current === 'waiting') {
+      // Wait until the reply has finished streaming and been spoken.
+      const replySpoken =
+        ttsAvailable !== true ||
+        (lastMessage?.role === 'assistant' && autoSpokenId === lastMessage.id);
+      if (streamState.isStreaming || ttsState !== 'idle' || !replySpoken) return;
+      setPhase('idle');
+    }
+    if (streamState.isStreaming || ttsState !== 'idle' || speechState !== 'idle') return;
+
+    // Short pause so the mic does not catch the tail of Jarvis's voice.
+    const timer = window.setTimeout(() => {
+      if (!conversationRef.current || phaseRef.current !== 'idle') return;
+      setPhase('listening');
+      listen()
+        .then((heard) => {
+          if (!conversationRef.current) {
+            setPhase('idle');
+            return;
+          }
+          if (heard.trim()) {
+            setPhase('waiting');
+            void sendRef.current(heard);
+          } else {
+            setPhase('idle');
+            setConversationMode(false);
+            toast('Conversation paused — click Talk to continue.');
+          }
+        })
+        .catch(() => {
+          setPhase('idle');
+          setConversationMode(false);
+        });
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [
+    conversationMode,
+    streamState.isStreaming,
+    ttsState,
+    ttsAvailable,
+    autoSpokenId,
+    speechState,
+    lastMessage?.id,
+    lastMessage?.role,
+    listen,
+    cancelRecording,
+    setConversationMode,
+    setPhase,
+  ]);
+
+  const toggleConversation = useCallback(() => {
+    if (conversationMode) {
+      setConversationMode(false);
+      useTtsStore.getState().stop();
+      return;
+    }
+    if (!speechAvailable) {
+      toast.error('Speech recognition is not available. Check that the OpenJarvis backend is running.');
+      return;
+    }
+    if (!selectedModel) {
+      toast.error('Pick a model first (⌘K)');
+      return;
+    }
+    // Interrupt Jarvis if it is still talking, then start listening.
+    useTtsStore.getState().stop();
+    void useTtsStore.getState().ensureHealth();
+    setConversationMode(true);
+  }, [conversationMode, speechAvailable, selectedModel, setConversationMode]);
+
+  const conversationLabel = !conversationMode
+    ? 'Talk'
+    : conversationPhase === 'listening'
+      ? speechState === 'transcribing' ? 'Got it…' : 'Listening…'
+      : ttsState === 'speaking' || ttsState === 'loading'
+        ? 'Jarvis speaking…'
+        : 'Jarvis thinking…';
+
+  const handlePaste = (e: React.ClipboardEvent) => {
+    const files = Array.from(e.clipboardData.files || []).filter((f) => f.type.startsWith('image/'));
+    if (files.length) {
+      e.preventDefault();
+      void addImageFiles(files);
+    }
+  };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -573,7 +767,45 @@ export function InputArea() {
             <Search size={12} />
             Deep Research
           </button>
+          <button
+            type="button"
+            onClick={toggleConversation}
+            aria-pressed={conversationMode}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs transition-colors cursor-pointer"
+            style={{
+              background: conversationMode ? 'var(--color-accent-subtle)' : 'transparent',
+              border: `1px solid ${conversationMode ? 'var(--color-accent)' : 'var(--color-border)'}`,
+              color: conversationMode ? 'var(--color-accent)' : 'var(--color-text-tertiary)',
+            }}
+            title={conversationMode ? 'Stop the voice conversation' : 'Talk to Jarvis hands-free: speak, pause, and it answers aloud'}
+          >
+            <AudioLines size={12} className={conversationMode ? 'animate-pulse' : undefined} />
+            {conversationLabel}
+          </button>
         </div>
+        {attachedImages.length > 0 && (
+          <div className="flex flex-wrap gap-2 pt-1">
+            {attachedImages.map((img) => (
+              <div
+                key={img.id}
+                className="relative rounded-lg overflow-hidden"
+                style={{ border: '1px solid var(--color-border)' }}
+                title={img.name}
+              >
+                <img src={img.dataUrl} alt={img.name} className="h-14 w-14 object-cover" />
+                <button
+                  type="button"
+                  onClick={() => setAttachedImages((prev) => prev.filter((i) => i.id !== img.id))}
+                  className="absolute top-0.5 right-0.5 rounded-full p-0.5 cursor-pointer"
+                  style={{ background: 'rgba(0,0,0,0.6)', color: 'white' }}
+                  aria-label={`Remove ${img.name}`}
+                >
+                  <X size={10} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         {deepResearch && corpusSync.syncing && corpusSync.itemsSynced > 0 && (
           <div
             className="text-[11px] leading-snug"
@@ -595,11 +827,35 @@ export function InputArea() {
           boxShadow: 'var(--shadow-sm)',
         }}
       >
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          multiple
+          className="hidden"
+          onChange={(e) => {
+            const files = Array.from(e.target.files || []);
+            e.target.value = '';
+            void addImageFiles(files);
+          }}
+        />
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={streamState.isStreaming || attachedImages.length >= MAX_IMAGES}
+          className="p-1.5 rounded-lg transition-colors shrink-0 cursor-pointer disabled:opacity-30 disabled:cursor-default"
+          style={{ color: 'var(--color-text-tertiary)' }}
+          title="Attach an image (photo of a question, diagram, notes)"
+          aria-label="Attach image"
+        >
+          <Paperclip size={16} />
+        </button>
         <textarea
           ref={textareaRef}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
           placeholder={selectedModel ? 'Message OpenJarvis...' : 'Pick a model first (⌘K)...'}
           rows={1}
           className="flex-1 bg-transparent outline-none resize-none text-sm leading-relaxed"
@@ -624,13 +880,18 @@ export function InputArea() {
               reason={micReason}
             />
             <button
-              onClick={sendMessage}
-              disabled={streamState.isStreaming || !input.trim() || modelLoading || !selectedModel}
+              onClick={() => void sendMessage()}
+              disabled={
+                streamState.isStreaming ||
+                (!input.trim() && attachedImages.length === 0) ||
+                modelLoading ||
+                !selectedModel
+              }
               title={selectedModel ? 'Send message' : 'Pick a model first (⌘K)'}
               className="p-2 rounded-xl transition-colors shrink-0 cursor-pointer disabled:opacity-30 disabled:cursor-default"
               style={{
-                background: input.trim() ? 'var(--color-accent)' : 'var(--color-bg-tertiary)',
-                color: input.trim() ? 'white' : 'var(--color-text-tertiary)',
+                background: input.trim() || attachedImages.length ? 'var(--color-accent)' : 'var(--color-bg-tertiary)',
+                color: input.trim() || attachedImages.length ? 'white' : 'var(--color-text-tertiary)',
               }}
             >
               <Send size={16} />

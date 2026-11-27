@@ -144,6 +144,13 @@ export function MessageBubble({ message, isLive = false }: Props) {
             wordBreak: 'break-word',
           }}
         >
+          {message.attachments && message.attachments.length > 0 && (
+            <div className="mb-1 text-xs opacity-80" style={{ whiteSpace: 'normal' }}>
+              {message.attachments.map((name, i) => (
+                <span key={`${name}-${i}`} className="mr-2">📎 {name}</span>
+              ))}
+            </div>
+          )}
           {message.content}
         </div>
       </div>

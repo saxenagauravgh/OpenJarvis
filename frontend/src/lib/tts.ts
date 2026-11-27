@@ -35,6 +35,24 @@ let objectUrl: string | null = null;
 let controller: AbortController | null = null;
 let token = 0;
 let healthProbe: Promise<void> | null = null;
+/** True when the server has no TTS backend and we speak with the OS voices. */
+let useBrowserVoice = false;
+
+/** The OS speech engine exposed to the webview, if any (macOS WKWebView has one). */
+function browserSynth(): SpeechSynthesis | null {
+  return typeof window !== 'undefined' && 'speechSynthesis' in window
+    ? window.speechSynthesis
+    : null;
+}
+
+/** Prefer an Indian English voice, then any local English voice. */
+function pickBrowserVoice(synth: SpeechSynthesis): SpeechSynthesisVoice | null {
+  const voices = synth.getVoices();
+  const byLang = (prefix: string) =>
+    voices.find((v) => v.lang?.toLowerCase().startsWith(prefix) && v.localService) ??
+    voices.find((v) => v.lang?.toLowerCase().startsWith(prefix));
+  return byLang('en-in') ?? byLang('en-gb') ?? byLang('en') ?? voices[0] ?? null;
+}
 
 /** Only a stream ending in the active conversation may trigger autoplay. */
 export function shouldAutoplayFinishedReply(
@@ -72,6 +90,7 @@ function teardown(): void {
     controller.abort();
     controller = null;
   }
+  if (useBrowserVoice) browserSynth()?.cancel();
 }
 
 export const useTtsStore = create<TtsStore>((set, get) => ({
@@ -86,12 +105,15 @@ export const useTtsStore = create<TtsStore>((set, get) => ({
     if (healthProbe) return healthProbe;
     healthProbe = fetchTtsHealth()
       .then((health) => {
-        set({ available: health.available });
-        if (!health.available) healthProbe = null;
+        // No server voice: speak with the OS voices instead, when present.
+        useBrowserVoice = !health.available && browserSynth() !== null;
+        set({ available: health.available || useBrowserVoice });
+        if (!health.available && !useBrowserVoice) healthProbe = null;
       })
       .catch(() => {
-        set({ available: false });
-        healthProbe = null;
+        useBrowserVoice = browserSynth() !== null;
+        set({ available: useBrowserVoice });
+        if (!useBrowserVoice) healthProbe = null;
       });
     return healthProbe;
   },
@@ -108,6 +130,35 @@ export const useTtsStore = create<TtsStore>((set, get) => ({
     const mine = token;
     teardown();
     set({ state: 'loading', speakingId: id, error: null, errorId: null });
+
+    const synth = useBrowserVoice ? browserSynth() : null;
+    if (synth) {
+      const utterance = new SpeechSynthesisUtterance(trimmed);
+      const voice = pickBrowserVoice(synth);
+      if (voice) {
+        utterance.voice = voice;
+        utterance.lang = voice.lang;
+      }
+      utterance.onstart = () => {
+        if (mine === token) set({ state: 'speaking', speakingId: id });
+      };
+      utterance.onend = () => {
+        if (mine === token) set({ state: 'idle', speakingId: null });
+      };
+      utterance.onerror = (event) => {
+        if (mine !== token) return;
+        // cancel() from stop()/a newer utterance reports interrupted/canceled.
+        const benign = event.error === 'interrupted' || event.error === 'canceled';
+        set({
+          state: 'idle',
+          speakingId: null,
+          error: benign ? null : 'Speech playback failed',
+          errorId: benign ? null : id,
+        });
+      };
+      synth.speak(utterance);
+      return;
+    }
 
     const ac = new AbortController();
     controller = ac;
@@ -159,6 +210,7 @@ export function __resetTtsForTests(): void {
   teardown();
   token = 0;
   healthProbe = null;
+  useBrowserVoice = false;
   useTtsStore.setState({
     state: 'idle',
     speakingId: null,

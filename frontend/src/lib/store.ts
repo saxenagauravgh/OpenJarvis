@@ -210,6 +210,10 @@ interface AppState {
   deepResearch: boolean;
   setDeepResearch: (on: boolean) => void;
 
+  // Hands-free voice conversation (not persisted)
+  conversationMode: boolean;
+  setConversationMode: (on: boolean) => void;
+
   // Actions: models & server
   setModels: (models: ModelInfo[]) => void;
   setModelsLoading: (loading: boolean) => void;
@@ -481,6 +485,10 @@ export const useAppStore = create<AppState>((set, get) => {
     // ── Deep Research ─────────────────────────────────────────────
     deepResearch: false,
     setDeepResearch: (on: boolean) => set({ deepResearch: on }),
+
+    // ── Conversation mode ─────────────────────────────────────────
+    conversationMode: false,
+    setConversationMode: (on: boolean) => set({ conversationMode: on }),
 
     // ── Models & server ────────────────────────────────────────────
 

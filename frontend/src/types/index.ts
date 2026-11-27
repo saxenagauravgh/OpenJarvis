@@ -127,6 +127,8 @@ export interface ChatMessage {
   usage?: TokenUsage;
   telemetry?: MessageTelemetry;
   audio?: { url: string };
+  /** File names of images sent with this message (image data is not stored). */
+  attachments?: string[];
 }
 
 export interface Conversation {
