@@ -102,3 +102,27 @@ class TestChatMessage:
     def test_with_tool_call_id(self):
         msg = ChatMessage(role="tool", content="result", tool_call_id="abc")
         assert msg.tool_call_id == "abc"
+
+
+def test_chat_message_accepts_openai_image_parts():
+    from openjarvis.server.models import ChatMessage
+
+    msg = ChatMessage(
+        role="user",
+        content=[
+            {"type": "text", "text": "Solve this"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}},
+            {"type": "image_url", "image_url": {"url": "https://example.com/x.png"}},
+        ],
+    )
+    assert msg.content == "Solve this"
+    # Inline data URLs are kept; remote URLs are never fetched.
+    assert msg.images == ["QUJD"]
+
+
+def test_chat_message_plain_string_unchanged():
+    from openjarvis.server.models import ChatMessage
+
+    msg = ChatMessage(role="user", content="hello")
+    assert msg.content == "hello"
+    assert msg.images is None

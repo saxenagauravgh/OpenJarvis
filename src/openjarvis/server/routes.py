@@ -53,6 +53,7 @@ def _to_messages(chat_messages) -> list[Message]:
                 ]
                 or None,
                 tool_call_id=m.tool_call_id,
+                images=list(m.images) if getattr(m, "images", None) else None,
             )
         )
     return messages
@@ -161,9 +162,13 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
     engine = request.app.state.engine
     agent = getattr(request.app.state, "agent", None)
     model = request_body.model
+    # Agent tool loops only forward message text, so a request carrying images
+    # goes straight to the (vision-capable) model instead of the server agent.
+    has_images = any(getattr(m, "images", None) for m in request_body.messages)
     use_server_agent = (
         agent is not None
         and not request_body.tools
+        and not has_images
         and (not request_body.stream or bool(getattr(agent, "_tools", None)))
     )
 
@@ -232,6 +237,7 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
                             ]
                             or None,
                             tool_call_id=getattr(msg, "tool_call_id", None),
+                            images=getattr(msg, "images", None),
                         )
                     )
                 request_body.messages = new_msgs

@@ -7,7 +7,10 @@ httpx directly so no cloud SDK packages are required.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
+import logging
 import os
 from collections.abc import AsyncIterator
 from typing import Any, Sequence
@@ -16,6 +19,8 @@ import httpx
 
 from openjarvis.core.paths import get_config_dir
 from openjarvis.core.types import Message
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Key / provider detection
@@ -155,8 +160,28 @@ def _to_google_contents(messages: Sequence[Message]) -> list[dict[str, Any]]:
         elif role == "assistant":
             contents.append({"role": "model", "parts": [{"text": m.content or ""}]})
         else:
-            contents.append({"role": "user", "parts": [{"text": m.content or ""}]})
+            contents.append({"role": "user", "parts": _google_user_parts_rest(m)})
     return contents
+
+
+def _google_user_parts_rest(m: Message) -> list[dict[str, Any]]:
+    """REST ``parts`` for a user message: its text plus any inline images."""
+    from openjarvis.engine.cloud import _sniff_image_mime
+
+    images = getattr(m, "images", None) or []
+    parts: list[dict[str, Any]] = []
+    if m.content or not images:
+        parts.append({"text": m.content or ""})
+    for image_b64 in images:
+        try:
+            head = base64.b64decode(image_b64[:64], validate=True)
+        except (binascii.Error, ValueError):
+            logger.warning("Skipping invalid base64 image in message")
+            continue
+        parts.append(
+            {"inlineData": {"mimeType": _sniff_image_mime(head), "data": image_b64}}
+        )
+    return parts or [{"text": ""}]
 
 
 # ---------------------------------------------------------------------------
@@ -281,11 +306,14 @@ async def _stream_google(
 
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{model}:streamGenerateContent?alt=sse&key={api_key}"
+        f"{model}:streamGenerateContent?alt=sse"
     )
 
     async with httpx.AsyncClient(timeout=180) as client:
-        async with client.stream("POST", url, json=payload) as resp:
+        # Send the key as a header, not a URL query, so it never appears in
+        # logged request URLs or error messages.
+        headers = {"x-goog-api-key": api_key}
+        async with client.stream("POST", url, json=payload, headers=headers) as resp:
             resp.raise_for_status()
             async for line in resp.aiter_lines():
                 if not line.startswith("data: "):

@@ -5,6 +5,8 @@ OpenAI, Anthropic, Google, MiniMax, DeepSeek, and Atlas Cloud API backends.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import logging
 import os
@@ -389,6 +391,34 @@ def _convert_tools_to_anthropic(
             }
         )
     return result
+
+
+def _sniff_image_mime(data: bytes) -> str:
+    """Best-effort image MIME type from magic bytes (defaults to JPEG)."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/jpeg"
+
+
+def _google_user_parts(message: Message) -> List[Dict[str, Any]]:
+    """Gemini ``parts`` for a user message: its text plus any inline images."""
+    parts: List[Dict[str, Any]] = []
+    if message.content or not message.images:
+        parts.append({"text": message.content or ""})
+    for image_b64 in message.images or []:
+        try:
+            data = base64.b64decode(image_b64, validate=True)
+        except (binascii.Error, ValueError):
+            logger.warning("Skipping invalid base64 image in message")
+            continue
+        parts.append(
+            {"inline_data": {"mime_type": _sniff_image_mime(data), "data": data}}
+        )
+    return parts or [{"text": ""}]
 
 
 def _convert_tools_to_google(
@@ -939,7 +969,7 @@ class CloudEngine(InferenceEngine):
             elif m.role.value == "assistant":
                 contents.append({"role": "model", "parts": [{"text": m.content}]})
             else:
-                contents.append({"role": "user", "parts": [{"text": m.content}]})
+                contents.append({"role": "user", "parts": _google_user_parts(m)})
 
         from google.genai import types as genai_types
 
@@ -1472,7 +1502,7 @@ class CloudEngine(InferenceEngine):
             elif m.role.value == "assistant":
                 contents.append({"role": "model", "parts": [{"text": m.content}]})
             else:
-                contents.append({"role": "user", "parts": [{"text": m.content}]})
+                contents.append({"role": "user", "parts": _google_user_parts(m)})
 
         from google.genai import types as genai_types
 
@@ -1550,7 +1580,7 @@ class CloudEngine(InferenceEngine):
             elif message.role.value == "assistant":
                 contents.append({"role": "model", "parts": [{"text": message.content}]})
             else:
-                contents.append({"role": "user", "parts": [{"text": message.content}]})
+                contents.append({"role": "user", "parts": _google_user_parts(message)})
 
         from google.genai import types as genai_types
 
