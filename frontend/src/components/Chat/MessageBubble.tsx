@@ -135,7 +135,7 @@ export function MessageBubble({ message, isLive = false }: Props) {
       <div className="flex justify-end mb-4">
         <div
           dir="auto"
-          className="max-w-[85%] px-4 py-2.5 text-sm leading-relaxed"
+          className="hud-user-bubble max-w-[85%] px-4 py-2.5 text-sm leading-relaxed"
           style={{
             background: 'var(--color-user-bubble)',
             color: 'var(--color-user-bubble-text)',

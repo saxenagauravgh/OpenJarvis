@@ -12,6 +12,7 @@ import {
   resolveChatEngine,
 } from '../../lib/chat-telemetry';
 import { MicButton } from './MicButton';
+import { VoiceOrb, type OrbState } from './VoiceOrb';
 import { useSpeech } from '../../hooks/useSpeech';
 import { useTtsStore } from '../../lib/tts';
 import type {
@@ -724,6 +725,15 @@ export function InputArea() {
     setConversationMode(true);
   }, [conversationMode, speechAvailable, selectedModel, setConversationMode]);
 
+  const orbState: OrbState =
+    conversationPhase === 'listening'
+      ? speechState === 'transcribing' ? 'transcribing' : 'listening'
+      : ttsState === 'speaking' || ttsState === 'loading'
+        ? 'speaking'
+        : streamState.isStreaming || conversationPhase === 'waiting'
+          ? 'thinking'
+          : 'idle';
+
   const conversationLabel = !conversationMode
     ? 'Talk'
     : conversationPhase === 'listening'
@@ -749,6 +759,7 @@ export function InputArea() {
 
   return (
     <div className="px-4 pb-4 pt-2" style={{ maxWidth: 'var(--chat-max-width)', margin: '0 auto', width: '100%' }}>
+      {conversationMode && <VoiceOrb state={orbState} />}
       <div className="mb-2 flex flex-col gap-1">
         <div className="flex items-center gap-2">
           <button
@@ -756,7 +767,7 @@ export function InputArea() {
             onClick={() => setDeepResearch(!deepResearch)}
             disabled={streamState.isStreaming}
             aria-pressed={deepResearch}
-            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs transition-colors cursor-pointer disabled:cursor-default disabled:opacity-50"
+            className="hud-pill inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs transition-colors cursor-pointer disabled:cursor-default disabled:opacity-50"
             style={{
               background: deepResearch ? 'var(--color-accent-subtle)' : 'transparent',
               border: `1px solid ${deepResearch ? 'var(--color-accent)' : 'var(--color-border)'}`,
@@ -771,7 +782,7 @@ export function InputArea() {
             type="button"
             onClick={toggleConversation}
             aria-pressed={conversationMode}
-            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs transition-colors cursor-pointer"
+            className="hud-pill inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs transition-colors cursor-pointer"
             style={{
               background: conversationMode ? 'var(--color-accent-subtle)' : 'transparent',
               border: `1px solid ${conversationMode ? 'var(--color-accent)' : 'var(--color-border)'}`,
@@ -820,7 +831,7 @@ export function InputArea() {
         )}
       </div>
       <div
-        className="flex items-center gap-2 rounded-2xl px-4 py-3 transition-shadow"
+        className="hud-frame flex items-center gap-2 rounded-2xl px-4 py-3 transition-shadow"
         style={{
           background: 'var(--color-input-bg)',
           border: '1px solid var(--color-input-border)',

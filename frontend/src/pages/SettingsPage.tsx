@@ -9,6 +9,7 @@ import {
   Sun,
   Moon,
   Monitor,
+  Radar,
   Download,
   Upload,
   Trash2,
@@ -284,6 +285,7 @@ const themeOptions: { value: ThemeMode; label: string; icon: typeof Sun }[] = [
   { value: 'light', label: 'Light', icon: Sun },
   { value: 'dark', label: 'Dark', icon: Moon },
   { value: 'system', label: 'System', icon: Monitor },
+  { value: 'hud', label: 'HUD', icon: Radar },
 ];
 
 export function SettingsPage() {

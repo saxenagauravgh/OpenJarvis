@@ -14,9 +14,10 @@ function applyTheme() {
     const raw = localStorage.getItem('openjarvis-settings');
     const settings = raw ? JSON.parse(raw) : {};
     const theme = settings.theme || 'system';
-    if (theme === 'dark') {
+    if (theme === 'dark' || theme === 'hud') {
       document.documentElement.classList.add('dark');
       document.documentElement.classList.remove('light');
+      if (theme === 'hud') document.documentElement.classList.add('hud');
     } else if (theme === 'light') {
       document.documentElement.classList.add('light');
       document.documentElement.classList.remove('dark');

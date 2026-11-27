@@ -51,9 +51,11 @@ export default function App() {
   // Apply theme class to <html>
   useEffect(() => {
     const root = document.documentElement;
-    root.classList.remove('dark', 'light');
+    root.classList.remove('dark', 'light', 'hud');
     if (settings.theme === 'dark') root.classList.add('dark');
     else if (settings.theme === 'light') root.classList.add('light');
+    // HUD is a dark theme with extra styling layered on top.
+    else if (settings.theme === 'hud') root.classList.add('dark', 'hud');
   }, [settings.theme]);
 
   // Sync overlay conversations into the main app
