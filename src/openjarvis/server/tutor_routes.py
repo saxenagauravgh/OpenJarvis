@@ -31,6 +31,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from openjarvis.core.config import DEFAULT_CONFIG_DIR
 from openjarvis.core.events import EventType
 from openjarvis.core.types import (
     TOKEN_COUNTING_VERSION,
@@ -46,6 +47,7 @@ from openjarvis.server.routes import (
     _record_completed_exchange,
     _uses_direct_cloud_router,
 )
+from openjarvis.server.tutor_knowledge import select_notes, uploaded_excerpts
 
 logger = logging.getLogger("openjarvis.server.tutor")
 
@@ -141,6 +143,30 @@ def _conversation(turns: list[TutorMessage]) -> list[Message]:
         elif turn.role == "assistant" and turn.content.strip():
             messages.append(Message(role=Role.ASSISTANT, content=turn.content))
     return messages
+
+
+def _with_reference_notes(messages: list[Message]) -> list[Message]:
+    """Append the relevant subject and teaching notes to the system prompt."""
+    questions = [m.text for m in messages if m.role == Role.USER and m.text]
+    parts: list[str] = []
+    try:
+        parts.append(select_notes(questions))
+    except Exception:
+        logger.warning("Could not add tutor reference notes", exc_info=True)
+    try:
+        if questions:
+            parts.append(
+                uploaded_excerpts(questions[-1], DEFAULT_CONFIG_DIR / "knowledge.db")
+            )
+    except Exception:
+        logger.warning("Could not search the uploaded documents", exc_info=True)
+    notes = "\n\n".join(part for part in parts if part)
+    if not notes:
+        return messages
+    if messages and messages[0].role == Role.SYSTEM:
+        combined = f"{messages[0].text}\n\n{notes}"
+        return [replace(messages[0], content=combined), *messages[1:]]
+    return [Message(role=Role.SYSTEM, content=notes), *messages]
 
 
 def _without_images(messages: list[Message]) -> list[Message]:
@@ -465,6 +491,7 @@ async def tutor_chat(body: TutorChatRequest, request: Request):
     state = request.app.state
     model = body.model.strip() or getattr(state, "model", "") or LOCAL_FALLBACK_MODEL
     messages = _ensure_identity_prompt(messages, getattr(state, "config", None))
+    messages = _with_reference_notes(messages)
 
     return StreamingResponse(
         _guarded(_tutor_events(model, messages, query, state)),
