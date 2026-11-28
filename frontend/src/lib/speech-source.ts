@@ -38,7 +38,7 @@ function sentenceEnds(text: string, from: number): number[] {
     const end = from + match.index + match[0].length;
     const before = text.slice(from, end);
     const dollars = (before.replace(/\\\$/g, '').match(/\$/g) ?? []).length;
-    const fences = (before.match(/```/g) ?? []).length;
+    const fences = (before.match(/```|~~~/g) ?? []).length;
     if (dollars % 2 === 0 && fences % 2 === 0) ends.push(end);
   }
   return ends;

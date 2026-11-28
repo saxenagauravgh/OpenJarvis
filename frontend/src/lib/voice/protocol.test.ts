@@ -19,6 +19,8 @@ describe('parseServerMessage', () => {
     { type: 'board', turnId: 't1', title: 'Ohm', markdown: '$V=IR$' },
     { type: 'action', turnId: 't1', setting: 'theme', value: 'dark' },
     { type: 'interrupted', turnId: 't1' },
+    { type: 'searching', turnId: 't1', query: 'moon gravity' },
+    { type: 'sources', turnId: 't1', items: [{ title: 'NASA', url: 'https://nasa.gov/moon' }] },
     { type: 'turn_complete', turnId: 't1' },
     { type: 'error', code: 'busy', message: 'Busy.', retryable: true },
   ])('reads $type', (message) => {
@@ -49,6 +51,22 @@ describe('parseServerMessage', () => {
     expect(parseServerMessage(raw)).toBeNull();
   });
 
+  it('keeps only web links among sources, naming those without a title', () => {
+    expect(
+      read({
+        type: 'sources',
+        turnId: 2,
+        items: [{ url: 'http://example.com/a' }, { title: 'x', url: 'data:text/html,x' }, null],
+      }),
+    ).toEqual({
+      type: 'sources',
+      turnId: '2',
+      items: [{ title: 'example.com', url: 'http://example.com/a' }],
+    });
+    expect(read({ type: 'searching', turnId: 't', query: '' })).toBeNull();
+    expect(read({ type: 'sources', turnId: 't' })).toBeNull();
+  });
+
   it('ignores binary data', () => {
     expect(parseServerMessage(new ArrayBuffer(2))).toBeNull();
   });
@@ -56,11 +74,12 @@ describe('parseServerMessage', () => {
 
 describe('client messages', () => {
   it('follow the contract', () => {
-    expect(JSON.parse(startMessage([{ role: 'user', text: 'Hi' }], true))).toEqual({
+    expect(JSON.parse(startMessage([{ role: 'user', text: 'Hi' }], true, 'off'))).toEqual({
       type: 'start',
       v: 1,
       adultConfirmed: true,
       history: [{ role: 'user', text: 'Hi' }],
+      webSearch: 'off',
     });
     expect(JSON.parse(textMessage('Why?'))).toEqual({ type: 'text', text: 'Why?' });
     expect(JSON.parse(stopMessage())).toEqual({ type: 'stop' });

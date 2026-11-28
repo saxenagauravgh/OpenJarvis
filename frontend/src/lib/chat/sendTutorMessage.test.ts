@@ -90,6 +90,8 @@ describe('sendTutorMessage', () => {
       model: 'gemini-2.5-flash',
       messages: [{ role: 'user', content: 'Second law?' }],
       adultConfirmed: true,
+      webSearch: 'auto',
+      team: false,
     });
     expect(messages()).toHaveLength(2);
     expect(messages()[1]).toMatchObject({
@@ -311,5 +313,143 @@ describe('sendTutorMessage', () => {
 
     expect(await send('q')).toBeNull();
     expect(requests).toHaveLength(0);
+  });
+});
+
+describe('web search and the expert team', () => {
+  const asked = () => requests.map(({ webSearch, team }) => [webSearch, team]);
+  const source = { title: 'NASA', url: 'https://nasa.gov/moon' };
+
+  it('builds the request from the settings, ignoring the Web pill for speech', async () => {
+    replies.push(...Array.from({ length: 3 }, () => sse(delta('a'), done())));
+    const { store, send } = await load();
+    store.getState().updateSettings({ webAlways: true, expertTeam: true });
+
+    await send('typed');
+    await send('spoken', { spoken: true });
+    store.getState().updateSettings({ webSearchEnabled: false });
+    await send('off');
+
+    expect(asked()).toEqual([
+      ['always', true],
+      ['auto', true],
+      ['off', true],
+    ]);
+  });
+
+  it('keeps choices on Retry; Continue neither re-searches nor re-runs the team', async () => {
+    replies.push(
+      sse(failure),
+      sse(delta('a'), done('length')),
+      sse(delta('b'), done('length')),
+      sse(delta('c'), done()),
+    );
+    const { store, chat, send, messages } = await load();
+    store.getState().updateSettings({ webAlways: true, expertTeam: true });
+    const failed = await send('q');
+    store.getState().updateSettings({ webAlways: false, expertTeam: false });
+    const conversationId = store.getState().activeId!;
+
+    await chat.retryTutorMessage(conversationId, failed!.id, 'gemini-2.5-flash');
+    await chat.continueTutorMessage(conversationId, 'gemini-2.5-flash');
+    // The Settings switch still wins over an earlier choice.
+    store.getState().updateSettings({ webSearchEnabled: false });
+    await chat.continueTutorMessage(conversationId, 'gemini-2.5-flash');
+
+    expect(asked()).toEqual([
+      ['always', true],
+      ['always', true],
+      ['auto', false],
+      ['off', false],
+    ]);
+    expect(messages()[2].choices).toEqual({ web: false, team: false });
+  });
+
+  it('shows progress while streaming and keeps it on the finished reply', async () => {
+    let stream!: ReadableStreamDefaultController<Uint8Array>;
+    replies.push(
+      () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              stream = controller;
+            },
+          }),
+        ),
+      sse(delta('next'), done()),
+    );
+    const { send, messages } = await load();
+    const push = (text: string) => stream.enqueue(encoder.encode(text));
+    const member = (status: string) =>
+      frame('team', { member: 'physics', label: 'Physics expert', status });
+
+    const pending = send('q');
+    await vi.waitFor(() => expect(stream).toBeDefined());
+    push(member('working') + frame('searching', { query: 'moon gravity' }));
+    await vi.waitFor(() => expect(messages()[1].searching).toBe('moon gravity'));
+    expect(messages()[1].team).toEqual([
+      { member: 'physics', label: 'Physics expert', status: 'working' },
+    ]);
+
+    push(frame('sources', { items: [source] }));
+    await vi.waitFor(() => expect(messages()[1].webSources).toEqual([source]));
+    expect(messages()[1].searching).toBeUndefined();
+
+    push(frame('searching', { query: 'again' }) + delta('1.62'));
+    await vi.waitFor(() => expect(messages()[1].content).toBe('1.62'));
+    expect(messages()[1].searching).toBeUndefined();
+
+    push(frame('sources', { items: [source] }) + member('done') + done());
+    stream.close();
+    await pending;
+
+    expect(messages()[1]).toMatchObject({
+      content: '1.62',
+      webSearches: ['moon gravity', 'again'],
+      webSources: [source],
+      team: [{ member: 'physics', label: 'Physics expert', status: 'done' }],
+    });
+    expect(messages()[1].searching).toBeUndefined();
+
+    await send('q2');
+    expect(requests[1].messages[1]).toEqual({ role: 'assistant', content: '1.62' });
+  });
+
+  it('records the notices for a failed search or an unavailable team', async () => {
+    replies.push(
+      sse(
+        frame('notice', { code: 'search_failed', message: 'The search failed.' }),
+        frame('notice', { code: 'team_unavailable', message: 'The team is unavailable.' }),
+        delta('hi'),
+        done(),
+      ),
+    );
+    const { send } = await load();
+
+    expect((await send('q'))?.notices?.map((n) => n.code)).toEqual([
+      'search_failed',
+      'team_unavailable',
+    ]);
+  });
+
+  it('forgets a search that was still running when the app closed', async () => {
+    const first = await load();
+    const conversationId = first.store.getState().createConversation('gemini-2.5-flash');
+    first.store.getState().addMessage(conversationId, {
+      id: 'r',
+      role: 'assistant',
+      content: '',
+      timestamp: 0,
+      live: true,
+      searching: 'x',
+      webSearches: ['x'],
+    });
+
+    vi.resetModules(); // relaunch
+    const { messages } = await load();
+
+    expect(messages()[0].searching).toBeUndefined();
+    expect(messages()[0].webSearches).toEqual(['x']);
+    expect(localStorage.getItem('openjarvis-conversations')).not.toContain('"searching"');
   });
 });

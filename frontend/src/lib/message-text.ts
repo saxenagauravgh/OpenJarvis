@@ -1,13 +1,35 @@
 /** Text helpers shared between the message renderer and voice output. */
 
 /**
+ * A fenced code block, to its closing fence or to the end of a text that is
+ * still arriving. Captures the whole block, the fence and the language.
+ */
+const FENCE =
+  /^([ \t>]*(?:(?:[-*+]|\d+[.)])[ \t]+)?(`{3,}|~{3,})[ \t]*([\w-]*)[^`\n]*(?:\n[\s\S]*?)??(?:\n[ \t>]*\2[`~]*[ \t\r]*(?=\n|$)|(?![\s\S])))/gm;
+
+/** Whether a fenced code block, as written in the Markdown, has its closing fence. */
+export function isFenceClosed(block: string): boolean {
+  const lines = block.trimEnd().split('\n');
+  const fence = /(`{3,}|~{3,})/.exec(lines[0])?.[1];
+  if (!fence) return true;
+  const last = lines[lines.length - 1].replace(/^[ \t>]*/, '');
+  return lines.length > 1 && last.startsWith(fence) && /^(?:`+|~+)$/.test(last);
+}
+
+/**
  * Rewrite LaTeX \(...\) and \[...\] delimiters (common in local-model output)
  * as $...$ and $$...$$, which the markdown math renderer understands.
  */
 export function normalizeMathDelimiters(text: string): string {
+  // Drawings and graph descriptions must reach their renderers untouched.
+  const blocks: string[] = [];
   return text
+    .replace(FENCE, (block: string, _all: string, _fence: string, lang: string) =>
+      /^(?:svg|plot)$/i.test(lang) ? `\u0000${blocks.push(block) - 1}\u0000` : block,
+    )
     .replace(/\\\[([\s\S]+?)\\\]/g, (_m, expr: string) => `$$${expr}$$`)
-    .replace(/\\\(([\s\S]+?)\\\)/g, (_m, expr: string) => `$${expr}$`);
+    .replace(/\\\(([\s\S]+?)\\\)/g, (_m, expr: string) => `$${expr}$`)
+    .replace(/\u0000(\d+)\u0000/g, (_m, i: string) => blocks[Number(i)]);
 }
 
 /** Remove <think> reasoning blocks so they are neither shown nor spoken. */
@@ -47,9 +69,56 @@ const MATH_WORDS: Record<string, string> = {
   displaystyle: '',
 };
 
+/** Read the inside of \ce{...}: reactions, charges and states. */
+function chemistryToSpeech(formula: string): string {
+  return formula
+    .replace(/<=>>|<<=>|<=>/g, ' is in equilibrium with ')
+    .replace(/<->/g, ' resonates with ')
+    .replace(/->(?:\s*\[[^\]]*\])*/g, ' gives ')
+    .replace(/\^\s*\{?\s*(\d*)\s*([+-])\s*\}?/g, (_m, n: string, sign: string) =>
+      ` ${n} ${sign === '+' ? 'plus' : 'minus'} `,
+    )
+    .replace(/(?<=[\p{L}\p{N})\]}])\+(?!\p{L})/gu, ' plus ')
+    .replace(/(?<=[\p{L}\p{N})\]}])-(?=\s|$|\()/gu, ' minus ')
+    .replace(/\+/g, ' plus ')
+    .replace(/=/g, ' double bond ')
+    .replace(/[_^{}$-]/g, ' ');
+}
+
+/** Read the inside of \pu{...}: a quantity with its units. */
+function unitsToSpeech(quantity: string): string {
+  return quantity
+    .replace(
+      /(\d)[eE]\+?(-?)(\d+)/g,
+      (_m, digit: string, sign: string, n: string) =>
+        `${digit} times 10 to the power ${sign ? 'minus ' : ''}${n}`,
+    )
+    .replace(/(?<=[\p{L})}])\^?\{?-(\d+)\}?/gu, ' to the power minus $1 ')
+    .replace(/\//g, ' per ')
+    .replace(/[_^{}$*.](?!\d)/g, ' ');
+}
+
+/** Replace each \ce{...} and \pu{...}, whose braces may nest, with words. */
+function speakChemistry(expr: string): string {
+  let out = expr;
+  for (let found = /\\(ce|pu)\s*\{/.exec(out); found; found = /\\(ce|pu)\s*\{/.exec(out)) {
+    const start = found.index + found[0].length;
+    let depth = 1;
+    let end = start;
+    for (; end < out.length; end += 1) {
+      if (out[end] === '{') depth += 1;
+      else if (out[end] === '}') depth -= 1;
+      if (!depth) break;
+    }
+    const read = found[1] === 'ce' ? chemistryToSpeech : unitsToSpeech;
+    out = `${out.slice(0, found.index)} ${read(out.slice(start, end))} ${out.slice(end + 1)}`;
+  }
+  return out;
+}
+
 /** Read one LaTeX math expression the way a teacher would say it. */
 export function mathToSpeech(expr: string): string {
-  let m = expr;
+  let m = speakChemistry(expr);
   m = m.replace(/\\(?:text|mathrm|mathbf|mathit|operatorname)\s*\{([^{}]*)\}/g, ' $1 ');
   // \frac{a}{b} -> "a over b", innermost first so nesting resolves.
   for (let i = 0; i < 5; i += 1) {
@@ -97,6 +166,11 @@ function speakMathSpans(text: string): string {
  */
 export function toSpeakableText(text: string): string {
   let t = stripThinkTags(text);
+  t = t.replace(FENCE, (block: string, _all: string, _fence: string, lang: string) => {
+    if (/^svg$/i.test(lang)) return '\nA diagram is shown on screen.\n';
+    if (/^plot$/i.test(lang)) return '\nA graph is shown on screen.\n';
+    return block;
+  });
   t = t.replace(/```[\s\S]*?```/g, ' (code block omitted). ');
   t = speakMathSpans(t);
   t = t.replace(/`([^`]*)`/g, '$1');

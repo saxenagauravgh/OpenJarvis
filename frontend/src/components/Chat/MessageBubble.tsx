@@ -1,11 +1,15 @@
-import { useState, useMemo } from 'react';
+import { createContext, useContext, useState, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
 import rehypeKatex from 'rehype-katex';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import 'katex/dist/katex.min.css';
-import { Copy, Check, FileText, Image as ImageIcon } from 'lucide-react';
+// Chemical equations and units: \ce{...} and \pu{...}.
+import 'katex/contrib/mhchem';
+import { Copy, Check, FileDown, FileText, Image as ImageIcon } from 'lucide-react';
+import { toast } from 'sonner';
+import { saveAsPdf } from '../../lib/export-pdf';
 import { AudioPlayer } from './AudioPlayer';
 import { ToolCallCard } from './ToolCallCard';
 import { ResearchTimeline } from './ResearchTimeline';
@@ -14,9 +18,12 @@ import { XRayFooter } from './XRayFooter';
 import { SpeakMessageButton } from './SpeakMessageButton';
 import { MessageError, MessageNotices, MessageOutcome } from './MessageStatus';
 import { SettingActionCard } from './SettingActionCard';
+import { SearchStatus, SourceList, TeamStatus } from './WebProgress';
 import type { ChatMessage } from '../../types';
 import { useAppStore } from '../../lib/store';
-import { normalizeMathDelimiters, stripThinkTags } from '../../lib/message-text';
+import { isFenceClosed, normalizeMathDelimiters, stripThinkTags } from '../../lib/message-text';
+import { DiagramBlock } from './visuals/DiagramBlock';
+import { PlotBlock } from './visuals/PlotBlock';
 import { formatFileSize } from '../../lib/chat/attachments';
 
 interface Props {
@@ -93,6 +100,68 @@ function CodeBlockPre({ children, ...props }: any) {
         {children}
       </pre>
     </div>
+  );
+}
+
+const VISUALS = {
+  svg: { Block: DiagramBlock, pending: 'Drawing diagram…' },
+  plot: { Block: PlotBlock, pending: 'Drawing graph…' },
+};
+
+/** The Markdown being rendered, so a block can tell whether it has all arrived. */
+const AnswerSource = createContext({ markdown: '', isLive: false });
+
+/** A fenced block: a picture for ```svg and ```plot, otherwise code. */
+function AnswerPre({ node, children, ...props }: any) {
+  const { markdown, isLive } = useContext(AnswerSource);
+  const codeElement = Array.isArray(children) ? children[0] : children;
+  const lang = /language-([\w-]+)/.exec(codeElement?.props?.className || '')?.[1].toLowerCase();
+  const codeView = <CodeBlockPre {...props}>{children}</CodeBlockPre>;
+  if (lang !== 'svg' && lang !== 'plot') return codeView;
+
+  const { Block, pending } = VISUALS[lang];
+  const block = markdown.slice(node?.position?.start.offset, node?.position?.end.offset);
+  if (isLive && !isFenceClosed(block)) {
+    return (
+      <div className="visual-pending" role="status" data-no-speech>
+        {pending}
+      </div>
+    );
+  }
+  const code = getTextContent(codeElement?.props?.children).replace(/\n$/, '');
+  return <Block code={code} codeView={codeView} />;
+}
+
+/** Wide tables scroll on their own instead of stretching the chat. */
+function ScrollTable({ node: _node, ...props }: any) {
+  return (
+    <div className="table-scroll">
+      <table {...props} />
+    </div>
+  );
+}
+
+function SavePdfButton({ messageId }: { messageId: string }) {
+  const save = () => {
+    const messages = useAppStore.getState().messages;
+    const index = messages.findIndex((m) => m.id === messageId);
+    const asked = messages[index - 1];
+    const question = asked?.role === 'user' ? asked.content : undefined;
+    void saveAsPdf(question?.slice(0, 60) || 'Tutor notes', [{ messageId, question }]).catch(() =>
+      toast.error('Could not open the print dialog.'),
+    );
+  };
+  return (
+    <button
+      type="button"
+      onClick={save}
+      className="p-1.5 rounded-md transition-colors cursor-pointer"
+      style={{ color: 'var(--color-text-tertiary)' }}
+      title="Save as PDF (in the dialog choose PDF, then Save as PDF)"
+      aria-label="Save answer as PDF"
+    >
+      <FileDown size={14} />
+    </button>
   );
 }
 
@@ -212,22 +281,29 @@ export function MessageBubble({ message, isLive = false, onRetry, onContinue }: 
       {message.audio?.url && <AudioPlayer src={message.audio.url} />}
 
       <MessageNotices notices={message.notices} />
+      <TeamStatus team={message.team} isLive={isLive} />
+      <SearchStatus message={message} isLive={isLive} />
 
       {/* Assistant message */}
       {cleanContent && (
-        <div className="prose max-w-none">
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm, remarkMath]}
-            rehypePlugins={rehypePlugins}
-            components={{
-              ...autoDirComponents,
-              pre: CodeBlockPre,
-            }}
-          >
-            {cleanContent}
-          </ReactMarkdown>
+        <div className="prose max-w-none" data-answer-content>
+          <AnswerSource.Provider value={{ markdown: cleanContent, isLive }}>
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm, remarkMath]}
+              rehypePlugins={rehypePlugins}
+              components={{
+                ...autoDirComponents,
+                pre: AnswerPre,
+                table: ScrollTable,
+              }}
+            >
+              {cleanContent}
+            </ReactMarkdown>
+          </AnswerSource.Provider>
         </div>
       )}
+
+      <SourceList sources={message.webSources} />
 
       {message.action && <SettingActionCard message={message} />}
       {message.error && (
@@ -242,6 +318,7 @@ export function MessageBubble({ message, isLive = false, onRetry, onContinue }: 
       {cleanContent && (
         <div className="flex items-center gap-2 mt-1.5">
           <CopyMessageButton content={cleanContent} />
+          {!isLive && <SavePdfButton messageId={message.id} />}
           {!isLive && (
             <SpeakMessageButton messageId={message.id} content={cleanContent} />
           )}

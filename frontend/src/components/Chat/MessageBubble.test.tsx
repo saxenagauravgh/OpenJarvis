@@ -107,3 +107,47 @@ describe('reply status', () => {
     expect(html({ finishReason: 'blocked' })).toContain('blocked');
   });
 });
+
+describe('web search and the expert team', () => {
+  const team = [{ member: 'physics', label: 'Physics expert', status: 'working' }] as const;
+  const reply = (message: Partial<ChatMessage>, isLive = false) =>
+    renderToStaticMarkup(
+      <MessageBubble
+        message={{ id: 'm1', timestamp: 0, role: 'assistant', content: 'x', ...message } as ChatMessage}
+        isLive={isLive}
+      />,
+    ).replace(/<!-- -->/g, '');
+
+  it('lists only web sources, as numbered links kept from read-aloud', () => {
+    const html = reply({
+      webSources: [
+        { title: 'NASA', url: 'https://nasa.gov/moon' },
+        { title: 'Trap', url: 'javascript:alert(1)' },
+      ],
+    });
+
+    expect(html).toMatch(/<div data-no-speech="true"[^>]*>.*<ol[^>]*><li[^>]*><a href="https:\/\/nasa.gov\/moon"/);
+    expect(html).toContain('target="_blank" rel="noopener noreferrer"');
+    expect(html).not.toContain('javascript:');
+    expect(html).not.toContain('Trap');
+  });
+
+  it('shows the search and expert progress while streaming', () => {
+    const html = reply({ searching: 'moon', webSearches: ['moon'], team: [...team] }, true);
+
+    expect(html).toContain('Searching the web: moon');
+    expect(html).toContain('Physics expert: working');
+  });
+
+  it('keeps a summary on the finished reply', () => {
+    const html = reply({ searching: 'moon', webSearches: ['moon', 'mars'], team: [...team] });
+
+    expect(html).not.toContain('Searching the web');
+    expect(html).toContain('Searched the web: moon; mars');
+    expect(html).toContain('Expert team: Physics expert (not finished)');
+  });
+
+  it('shows a live voice search without the chat streaming', () => {
+    expect(reply({ live: true, searching: 'moon' })).toContain('Searching the web: moon');
+  });
+});

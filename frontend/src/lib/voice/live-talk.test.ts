@@ -226,8 +226,43 @@ describe('a live session', () => {
     expect(socket().url).toBe('ws://localhost:8000/v1/voice/live');
     socket().open();
     expect(socket().sent).toEqual([
-      { type: 'start', v: 1, adultConfirmed: true, history: [{ role: 'user', text: 'Earlier' }] },
+      {
+        type: 'start',
+        v: 1,
+        adultConfirmed: true,
+        history: [{ role: 'user', text: 'Earlier' }],
+        webSearch: 'auto',
+      },
     ]);
+  });
+
+  it('asks for no web search when it is switched off', async () => {
+    const { useAppStore } = await import('../store');
+    useAppStore.getState().updateSettings({ webSearchEnabled: false });
+    const { socket } = await begin();
+    socket().open();
+    expect(socket().sent[0].webSearch).toBe('off');
+  });
+
+  it('saves a search and its sources on the answer', async () => {
+    const { socket, store } = await begin();
+    socket().ready();
+    socket().receive({ type: 'searching', turnId: 1, query: 'moon gravity' });
+    expect(store.getState().messages[0]).toMatchObject({
+      role: 'assistant',
+      searching: 'moon gravity',
+    });
+    const items = [{ title: 'NASA', url: 'https://nasa.gov/moon' }];
+    socket().receive({ type: 'sources', turnId: 1, items });
+    socket().receive({ type: 'transcript', turnId: 1, role: 'assistant', delta: '1.62.' });
+    socket().receive({ type: 'turn_complete', turnId: 1 });
+    const [reply] = store.getState().messages;
+    expect(reply).toMatchObject({
+      content: '1.62.',
+      webSearches: ['moon gravity'],
+      webSources: items,
+    });
+    expect(reply.searching).toBeUndefined();
   });
 
   it('sends microphone audio once ready, dropping it when backed up', async () => {
@@ -299,5 +334,32 @@ describe('a live session', () => {
     released();
     const saved = store.getState().conversations.find((c) => c.id === first)!;
     expect(saved.messages[0]).toMatchObject({ content: 'Half', stopped: true });
+  });
+});
+
+describe('highlighting in live voice', () => {
+  it('follows the spoken reply as it plays and clears afterwards', async () => {
+    const { socket, store } = await begin();
+    const { useTtsStore } = await import('../tts');
+    socket().ready();
+    socket().receive({
+      type: 'transcript',
+      turnId: 1,
+      role: 'assistant',
+      delta: 'Force equals mass times acceleration.',
+    });
+    socket().receive(new ArrayBuffer(4800)); // 2400 samples of reply audio
+    const playback = nodes['pcm-playback'].port;
+    playback.onmessage!({ data: { type: 'level', level: 0.2, remaining: 1200 } });
+
+    const reply = last(store.getState().messages) as { id: string; role: string };
+    expect(reply.role).toBe('assistant');
+    expect(useTtsStore.getState().speakingId).toBe(reply.id);
+    const caption = useTtsStore.getState().caption!;
+    expect(caption.charIndex).toBeGreaterThan(0);
+    expect(caption.charIndex).toBeLessThan(caption.text.length);
+
+    playback.onmessage!({ data: { type: 'drained' } });
+    expect(useTtsStore.getState().caption).toBeNull();
   });
 });

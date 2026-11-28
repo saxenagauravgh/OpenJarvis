@@ -4,19 +4,29 @@
 ``POST /v1/tutor/chat`` then name it by id in ``files``.
 
 
-It talks to the model itself (no server agent, no tools) and streams
-server-sent events:
+It talks to the model itself (no server agent) and streams server-sent events:
 
-``meta``    ``{"model", "provider": "gemini"|"local"}``
-``delta``   ``{"text"}``
-``notice``  ``{"code": "fallback_model"|"fallback_local"|"attachment_missing",
-            "message"}``
-``done``    ``{"finish_reason": "stop"|"length"|"blocked", "usage"}``
-``error``   ``{"code", "message", "retryable"}``
+``meta``       ``{"model", "provider": "gemini"|"local"}``
+``searching``  ``{"query"}``
+``sources``    ``{"items": [{"title", "url"}]}``, numbered as they are cited
+``team``       ``{"member": "physics"|"chemistry"|"maths"|"solver"|"checker",
+               "label", "status": "working"|"done"|"failed"}``
+``action``     ``{"setting", "value"}`` (a settings change to confirm)
+``delta``      ``{"text"}``
+``notice``     ``{"code": "fallback_model"|"fallback_local"|"attachment_missing"|
+               "search_failed"|"team_unavailable", "message"}``
+``done``       ``{"finish_reason": "stop"|"length"|"blocked", "usage"}``
+``error``      ``{"code", "message", "retryable"}``
 
 Every stream ends with exactly one ``done`` or ``error``. A different model is
 only tried before the first ``delta``, and is announced with a ``notice``
 followed by a new ``meta``. The persona comes from the server alone.
+
+``webSearch`` is ``"auto"`` (default: a Gemini model may ask for one search,
+after which it answers again), ``"always"`` (the latest typed question is
+searched first) or ``"off"``. A reply that has web text in its instructions
+declares no functions. ``team: true`` has experts draft the answer and a lead
+checker write it; both need a Gemini model.
 """
 
 from __future__ import annotations
@@ -30,7 +40,8 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 from dataclasses import dataclass, replace
-from typing import Any, List, Optional
+from functools import partial
+from typing import Any, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -50,7 +61,10 @@ from openjarvis.server import (
     attachments,
     cloud_router,
     tutor_attachments,
+    tutor_browse,
+    tutor_search,
     tutor_settings,
+    tutor_team,
 )
 from openjarvis.server.origin import require_trusted_origin
 from openjarvis.server.routes import (
@@ -58,7 +72,12 @@ from openjarvis.server.routes import (
     _record_completed_exchange,
     _uses_direct_cloud_router,
 )
-from openjarvis.server.tutor_knowledge import select_notes, uploaded_excerpts
+from openjarvis.server.tutor_knowledge import (
+    PRESENTATION_GUIDE,
+    add_to_system,
+    select_notes,
+    uploaded_excerpts,
+)
 
 logger = logging.getLogger("openjarvis.server.tutor")
 
@@ -87,6 +106,27 @@ _REASONS = {
 # Another Gemini model cannot succeed after these.
 _SKIP_TO_LOCAL = ("no_key", "bad_key", "network")
 
+_SEARCH_FAILED = (
+    "The web search did not work this time, so this answer does not use the web."
+)
+_SEARCH_EMPTY = (
+    "The web search found nothing to use, so this answer does not use the web."
+)
+_NO_QUERY = "There was nothing to search the web for."
+_PAGE_FAILED = "That link could not be opened, so this answer does not use it."
+_PAGE_UNREAD = (
+    "## Web page\n"
+    "The linked page could not be opened. Say so, do not guess what it contains, "
+    "and offer to help if the learner pastes the text."
+)
+_DEEP_PAGES = 4
+_TEAM_NEEDS_GEMINI = (
+    "The expert team needs a Gemini model, so the tutor is answering on its own."
+)
+_TEAM_FAILED = (
+    "The expert team could not answer this time, so the tutor is answering on its own."
+)
+
 
 class TutorMessage(BaseModel):
     role: str
@@ -101,6 +141,16 @@ class TutorChatRequest(BaseModel):
     messages: List[TutorMessage]
     # Deliberately untyped: only a literal JSON ``true`` confirms.
     adultConfirmed: Any = False
+    webSearch: Literal["auto", "always", "deep", "off"] = "auto"
+    team: bool = False
+
+
+@dataclass(frozen=True)
+class _Options:
+    web_search: str = "off"  # "auto" | "always" | "deep" | "off"
+    team: bool = False
+    #: What the learner typed, oldest first, without anything the server added.
+    typed: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -122,6 +172,10 @@ def _error_event(info: google_common.ErrorInfo) -> str:
 
 def _meta_event(candidate: _Candidate) -> str:
     return _sse("meta", {"model": candidate.model, "provider": candidate.provider})
+
+
+def _notice(code: str, message: str) -> str:
+    return _sse("notice", {"code": code, "message": message})
 
 
 def _clean_images(images: list[str]) -> tuple[list[str], int]:
@@ -170,7 +224,7 @@ def _conversation(turns: list[TutorMessage]) -> list[Message]:
 def _with_reference_notes(messages: list[Message]) -> list[Message]:
     """Append the relevant subject and teaching notes to the system prompt."""
     questions = [m.text for m in messages if m.role == Role.USER and m.text]
-    parts: list[str] = []
+    parts: list[str] = [PRESENTATION_GUIDE]
     try:
         parts.append(select_notes(questions))
     except Exception:
@@ -183,12 +237,7 @@ def _with_reference_notes(messages: list[Message]) -> list[Message]:
     except Exception:
         logger.warning("Could not search the uploaded documents", exc_info=True)
     notes = "\n\n".join(part for part in parts if part)
-    if not notes:
-        return messages
-    if messages and messages[0].role == Role.SYSTEM:
-        combined = f"{messages[0].text}\n\n{notes}"
-        return [replace(messages[0], content=combined), *messages[1:]]
-    return [Message(role=Role.SYSTEM, content=notes), *messages]
+    return add_to_system(messages, notes) if notes else messages
 
 
 def _without_images(messages: list[Message]) -> list[Message]:
@@ -198,8 +247,10 @@ def _without_images(messages: list[Message]) -> list[Message]:
         if message.images:
             note = (
                 f"[The learner attached {len(message.images)} image(s). You cannot "
-                "see images. Say so plainly, do not guess or invent what they show, "
-                "and ask the learner to type out the question.]"
+                "see images. If text read from them by OCR is included, use it and "
+                "say it may contain mistakes. Otherwise say so plainly, do not "
+                "guess or invent what they show, and ask the learner to type out "
+                "the question.]"
             )
             content = f"{message.text}\n\n{note}" if message.text else note
             message = replace(message, content=content, images=None)
@@ -246,11 +297,18 @@ def _local_error(model: str, exc: BaseException) -> google_common.ErrorInfo:
 
 
 async def _attempt(
-    candidate: _Candidate, messages: list[Message], sees_images: bool
+    candidate: _Candidate,
+    messages: list[Message],
+    sees_images: bool,
+    functions: list[dict[str, Any]],
 ) -> AsyncIterator[Any]:
-    """Events (``text`` / ``finish_reason`` / ``usage``) from one model."""
+    """Events (``text`` / ``finish_reason`` / ``usage``) from one model.
+
+    A Gemini model may also ``call`` one of *functions*.
+    """
     if candidate.provider == "gemini":
-        async with aclosing(_gemini_attempt(candidate.model, messages)) as events:
+        attempt = _gemini_attempt(candidate.model, messages, functions)
+        async with aclosing(attempt) as events:
             async for event in events:
                 yield event
         return
@@ -271,7 +329,13 @@ async def _attempt(
             yield event
 
 
-async def _gemini_attempt(model: str, messages: list[Message]) -> AsyncIterator[Any]:
+async def _gemini_attempt(
+    model: str,
+    messages: list[Message],
+    functions: list[dict[str, Any]],
+    *,
+    allow_fallback: bool = False,
+) -> AsyncIterator[Any]:
     """Stream from Gemini, uploading again once if a cached file was refused."""
     for retried in (False, True):
         prepared, reused = messages, []
@@ -284,9 +348,9 @@ async def _gemini_attempt(model: str, messages: list[Message]) -> AsyncIterator[
             prepared,
             temperature=TUTOR_TEMPERATURE,
             max_tokens=TUTOR_MAX_OUTPUT_TOKENS,
-            allow_fallback=False,
+            allow_fallback=allow_fallback,
             idle_timeout=GEMINI_IDLE_TIMEOUT_SECONDS,
-            functions=[tutor_settings.declaration()],
+            functions=functions,
         )
         started = False
         try:
@@ -376,8 +440,70 @@ def _record(
     )
 
 
+async def _read_links(urls: list[str]) -> tuple[list[str], str, bool]:
+    """Like :func:`_search`, for pages the learner linked to."""
+    pages = await tutor_browse.read_pages(urls)
+    if not pages:
+        return [_notice("search_failed", _PAGE_FAILED)], _PAGE_UNREAD, False
+    shown = _sse("sources", {"items": tutor_search.sources(pages)})
+    return [shown], tutor_search.reference_block(pages), True
+
+
+async def _search(query: str, deep: bool = False) -> tuple[list[str], str, bool]:
+    """Events to send, text for the instructions, and whether it holds web text."""
+    try:
+        if not query:
+            return (
+                [_notice("search_failed", _NO_QUERY)],
+                tutor_search.UNAVAILABLE,
+                False,
+            )
+        results = await tutor_search.search(query)
+        problem = _SEARCH_EMPTY
+        if deep and results:
+            # Open the top results and use their text instead of the snippet.
+            top = [item["url"] for item in results[:_DEEP_PAGES]]
+            read = await asyncio.gather(*(tutor_browse.fetch_page(u) for u in top))
+            for item, page in zip(results, read):
+                if page:
+                    item["snippet"] = page["snippet"]
+    except Exception as exc:  # noqa: BLE001 — the tutor answers without it
+        logger.warning("Tutor web search failed: %s", type(exc).__name__)
+        results, problem = [], _SEARCH_FAILED
+    if not results:
+        return [_notice("search_failed", problem)], tutor_search.UNAVAILABLE, False
+    shown = _sse("sources", {"items": tutor_search.sources(results)})
+    return [shown], tutor_search.reference_block(results), True
+
+
+def _continuation(said: str) -> str:
+    """Keeps the second reply from repeating what was said before the search."""
+    return (
+        "## Your reply so far\n"
+        "The learner has already been shown the text between the marks. Continue "
+        "straight after it without repeating or restarting it.\n"
+        f"<<<already shown>>>\n{said}\n<<<end of already shown>>>"
+    )
+
+
+async def _prepare_uploads(messages: list[Message]) -> None:
+    """Upload large files once, before several experts ask for them at once."""
+    if not any(m.metadata.get("attachments") for m in messages):
+        return
+    try:
+        api_key = google_common.load_api_key()
+        if api_key:
+            await tutor_attachments.for_gemini(messages, api_key)
+    except Exception as exc:  # each expert will meet and report the same problem
+        google_common.log_failure(logger, "Could not prepare files for the team", exc)
+
+
 async def _tutor_events(
-    model: str, messages: list[Message], query: str, state: Any
+    model: str,
+    messages: list[Message],
+    query: str,
+    state: Any,
+    options: _Options,
 ) -> AsyncIterator[str]:
     started_at = time.time()
     chain, unsupported = await asyncio.to_thread(
@@ -401,6 +527,16 @@ async def _tutor_events(
     switch_reason: Optional[str] = (
         "The tutor works with Gemini and offline models only." if unsupported else None
     )
+    typed_now = options.typed[-1] if options.typed else ""
+    links = tutor_browse.find_urls(typed_now) if options.web_search != "off" else []
+    search_first = options.web_search in ("always", "deep") or bool(links)
+    may_search = options.web_search == "auto"
+    # Set once web text is in the instructions, or the model's search is used up.
+    no_functions = False
+    team_wanted = options.team
+    # While the checker is answering: the messages without the experts' drafts.
+    unchecked: Optional[list[Message]] = None
+    team_usage = dict(_ZERO_USAGE)
 
     while True:
         candidate = chain[index]
@@ -424,13 +560,11 @@ async def _tutor_events(
                     notice = f"{switch_reason} {notice}"
                 if blind:
                     notice += (
-                        " It cannot see your attached image(s), so please type out "
+                        " It cannot see your attached image(s), only text read from "
+                        "them on this computer. If the answer looks wrong, type out "
                         "the question."
                     )
-            announcement = [
-                _sse("notice", {"code": code, "message": notice}),
-                _meta_event(candidate),
-            ]
+            announcement = [_notice(code, notice), _meta_event(candidate)]
             # A switch is announced before its meta. A directly selected model
             # that merely cannot see images states its meta first.
             if switch_reason is None:
@@ -440,32 +574,121 @@ async def _tutor_events(
         else:
             yield _meta_event(candidate)
 
+        if search_first:
+            search_first = False
+            if links:
+                hosts = ", ".join(link.split("/")[2] for link in links)
+                yield _sse("searching", {"query": f"Reading {hosts}"[:300]})
+                lines, reference, found = await _read_links(links)
+            else:
+                typed_query = tutor_search.clean_query(typed_now)
+                if typed_query:
+                    yield _sse("searching", {"query": typed_query})
+                lines, reference, found = await _search(
+                    typed_query, deep=options.web_search == "deep"
+                )
+            for line in lines:
+                yield line
+            messages = add_to_system(messages, reference)
+            no_functions = found
+
+        if team_wanted:
+            team_wanted = False
+            if candidate.provider != "gemini":
+                yield _notice("team_unavailable", _TEAM_NEEDS_GEMINI)
+            else:
+                await _prepare_uploads(messages)
+                panel = tutor_team.Panel(
+                    tutor_team.members_for(options.typed),
+                    messages,
+                    partial(
+                        _gemini_attempt,
+                        candidate.model,
+                        functions=[],
+                        allow_fallback=True,
+                    ),
+                )
+                async with aclosing(panel.run()) as statuses:
+                    async for status in statuses:
+                        yield _sse("team", status)
+                team_usage = panel.usage
+                if panel.drafts:
+                    unchecked = messages
+                    messages = tutor_team.for_checker(messages, panel.drafts)
+                else:
+                    yield _notice("team_unavailable", _TEAM_FAILED)
+
+        if unchecked is not None and candidate.provider != "gemini":
+            # The offline model cannot hold the drafts; it answers by itself.
+            messages, unchecked = unchecked, None
+            yield _notice("team_unavailable", _TEAM_FAILED)
+        checking = unchecked is not None
+        if checking:
+            yield _sse("team", tutor_team.status(tutor_team.CHECKER, "working"))
+
         answer: list[str] = []
         finish_reason = "stop"
-        usage = dict(_ZERO_USAGE)
+        usage = dict(team_usage)
         first_token_at = 0.0
         try:
-            async with aclosing(_attempt(candidate, messages, sees_images)) as events:
-                async for event in events:
-                    call = getattr(event, "call", None)
-                    if call and call["name"] == tutor_settings.TOOL_NAME:
-                        action = tutor_settings.validate(call["args"])
-                        if action:
-                            yield _sse("action", action)
-                        spoken = tutor_settings.reply_for(action)
-                        if answer:
-                            spoken = f"\n\n{spoken}"
-                        answer.append(spoken)
-                        yield _sse("delta", {"text": spoken})
-                    if event.text:
-                        if not answer:
-                            first_token_at = time.time()
-                        answer.append(event.text)
-                        yield _sse("delta", {"text": event.text})
-                    if event.finish_reason:
-                        finish_reason = event.finish_reason
-                    if event.usage:
-                        usage = event.usage
+            while True:
+                functions: list[dict[str, Any]] = []
+                if candidate.provider == "gemini" and not (checking or no_functions):
+                    functions.append(tutor_settings.declaration())
+                    if may_search:
+                        functions.append(tutor_search.declaration())
+                declared = {f["name"] for f in functions}
+                wanted: Optional[str] = None
+                finish_reason = "stop"
+                pass_usage = dict(_ZERO_USAGE)
+                # Text from before a search is set apart from what follows it.
+                gap = "\n\n" if answer else ""
+                attempt = _attempt(candidate, messages, sees_images, functions)
+                async with aclosing(attempt) as events:
+                    async for event in events:
+                        call = getattr(event, "call", None)
+                        name = call["name"] if call else None
+                        if name not in declared:
+                            name = None
+                        if name == tutor_settings.TOOL_NAME:
+                            action = tutor_settings.validate(call["args"])
+                            if action:
+                                yield _sse("action", action)
+                            spoken = tutor_settings.reply_for(action)
+                            if answer:
+                                spoken = f"\n\n{spoken}"
+                            answer.append(spoken)
+                            yield _sse("delta", {"text": spoken})
+                        elif name == tutor_search.TOOL_NAME and wanted is None:
+                            wanted = tutor_search.clean_query(call["args"].get("query"))
+                        if event.text:
+                            if checking and not answer:
+                                yield _sse(
+                                    "team",
+                                    tutor_team.status(tutor_team.CHECKER, "done"),
+                                )
+                            if not answer:
+                                first_token_at = time.time()
+                            text, gap = gap + event.text, ""
+                            answer.append(text)
+                            yield _sse("delta", {"text": text})
+                        if event.finish_reason:
+                            finish_reason = event.finish_reason
+                        if event.usage:
+                            pass_usage = event.usage
+                usage = {key: usage[key] + pass_usage.get(key, 0) for key in usage}
+                if wanted is None or finish_reason == "blocked":
+                    break
+                may_search = False
+                no_functions = True
+                if wanted:
+                    yield _sse("searching", {"query": wanted})
+                lines, reference, _ = await _search(wanted)
+                for line in lines:
+                    yield line
+                messages = add_to_system(messages, reference)
+                if answer:
+                    messages = add_to_system(messages, _continuation("".join(answer)))
         except Exception as exc:
             google_common.log_failure(
                 logger, f"Tutor reply from {candidate.model} failed", exc
@@ -475,6 +698,8 @@ async def _tutor_events(
                 if candidate.provider == "local"
                 else google_common.classify_error(exc)
             )
+            if checking and not answer:
+                yield _sse("team", tutor_team.status(tutor_team.CHECKER, "failed"))
             if answer:
                 yield _error_event(info)
                 return
@@ -501,6 +726,8 @@ async def _tutor_events(
             index = next_index
             continue
 
+        if checking and not answer:
+            yield _sse("team", tutor_team.status(tutor_team.CHECKER, "failed"))
         if not answer and finish_reason != "blocked":
             logger.warning("Tutor reply from %s was empty", candidate.model)
             yield _error_event(
@@ -636,12 +863,21 @@ async def tutor_chat(body: TutorChatRequest, request: Request):
         (m.text for m in reversed(messages) if m.role == Role.USER and m.text), ""
     )
     state = request.app.state
+    options = _Options(
+        web_search=body.webSearch,
+        team=body.team,
+        typed=tuple(
+            turn.content.strip()
+            for turn in body.messages
+            if turn.role == "user" and turn.content.strip()
+        ),
+    )
     model = body.model.strip() or getattr(state, "model", "") or LOCAL_FALLBACK_MODEL
     messages = _ensure_identity_prompt(messages, getattr(state, "config", None))
     messages = _with_reference_notes(messages)
 
     return StreamingResponse(
-        _guarded(_tutor_events(model, messages, query, state)),
+        _guarded(_tutor_events(model, messages, query, state, options)),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )

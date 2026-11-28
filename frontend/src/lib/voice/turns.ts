@@ -1,16 +1,27 @@
 /**
  * Turns live voice events into chat messages. Each turn becomes a user message
  * (what was heard) followed by an assistant message (what was said, plus
- * anything written on the board). Pure: the caller applies the changes.
+ * anything written on the board, with any web search and its sources). Pure:
+ * the caller applies the changes.
  */
+import { addQuery, mergeSources } from '../chat/web';
 import { parseAction } from '../setting-actions';
-import type { ChatMessage } from '../../types';
+import type { ChatMessage, WebSource } from '../../types';
 import type { ServerMessage } from './protocol';
 
 export type TurnEvent =
   | Extract<
       ServerMessage,
-      { type: 'transcript' | 'board' | 'action' | 'interrupted' | 'turn_complete' }
+      {
+        type:
+          | 'transcript'
+          | 'board'
+          | 'action'
+          | 'searching'
+          | 'sources'
+          | 'interrupted'
+          | 'turn_complete';
+      }
     >
   /** The user typed a message during the session. */
   | { type: 'typed'; text: string }
@@ -27,6 +38,10 @@ interface Turn {
   assistantId?: string;
   spoken: string;
   boards: { title: string; markdown: string }[];
+  /** A web search is shown as running on the reply. */
+  searching?: boolean;
+  webSearches?: string[];
+  webSources?: WebSource[];
   stopped?: boolean;
   done?: boolean;
 }
@@ -75,8 +90,13 @@ export function reduceTurns(
   if (event.type === 'ended') {
     // Replies cut off by the end of the session are marked as stopped.
     for (const turn of Object.values(state.turns)) {
-      if (turn.assistantId && !turn.done && !turn.stopped) {
-        changes.push({ type: 'patch', id: turn.assistantId, patch: { stopped: true } });
+      if (!turn.assistantId) continue;
+      const patch: Partial<ChatMessage> = {
+        ...(!turn.done && !turn.stopped ? { stopped: true } : {}),
+        ...(turn.searching ? { searching: undefined } : {}),
+      };
+      if (Object.keys(patch).length) {
+        changes.push({ type: 'patch', id: turn.assistantId, patch });
       }
     }
     return { state: initialTurns(), changes };
@@ -113,6 +133,13 @@ export function reduceTurns(
     changes.push({ type: 'add', message: added });
   };
 
+  /** The fields that take down a running search, if one is shown. */
+  const searchOver = (): Partial<ChatMessage> => {
+    if (!turn.searching) return {};
+    turn.searching = false;
+    return { searching: undefined };
+  };
+
   /** Add the user message, or update what has been heard of it. */
   const question = (
     heard: string,
@@ -135,7 +162,7 @@ export function reduceTurns(
     if (event.role === 'assistant') {
       turn.spoken += event.delta;
       if (!turn.assistantId && !turn.spoken.trim()) return save();
-      reply({ content: composeReply(turn.spoken, turn.boards) });
+      reply({ content: composeReply(turn.spoken, turn.boards), ...searchOver() });
       return save();
     }
     if (turn.stopped && turn.assistantId) {
@@ -157,7 +184,29 @@ export function reduceTurns(
     );
     if (known || !(event.title.trim() || event.markdown.trim())) return { state, changes };
     turn.boards = [...turn.boards, { title: event.title, markdown: event.markdown }];
-    reply({ content: composeReply(turn.spoken, turn.boards) });
+    reply({ content: composeReply(turn.spoken, turn.boards), ...searchOver() });
+    return save();
+  }
+
+  if (event.type === 'searching') {
+    turn.webSearches = addQuery(turn.webSearches ?? [], event.query);
+    // An interrupted reply is no longer waiting for anything.
+    turn.searching = !turn.stopped;
+    reply({
+      searching: turn.stopped ? undefined : event.query,
+      webSearches: turn.webSearches,
+    });
+    return save();
+  }
+
+  if (event.type === 'sources') {
+    const over = searchOver();
+    if (event.items.length) {
+      turn.webSources = mergeSources(turn.webSources ?? [], event.items);
+      reply({ webSources: turn.webSources, ...over });
+    } else if ('searching' in over) {
+      reply(over);
+    }
     return save();
   }
 
@@ -171,11 +220,13 @@ export function reduceTurns(
   if (event.type === 'interrupted') {
     turn.stopped = true;
     if (turn.assistantId) {
-      changes.push({ type: 'patch', id: turn.assistantId, patch: { stopped: true } });
+      reply({ stopped: true, ...searchOver() });
     }
     return save();
   }
 
   turn.done = true;
+  const over = searchOver();
+  if (turn.assistantId && 'searching' in over) reply(over);
   return save();
 }

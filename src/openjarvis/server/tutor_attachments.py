@@ -3,7 +3,8 @@
 Every turn resolves the files of the whole history, so follow-up questions still
 see them. Gemini reads images and PDFs itself (inline, or through its Files API
 when the request would be too big); documents are sent as delimited text. The
-offline model gets extracted text, and pictures only if it can see them.
+offline model gets extracted text, and pictures only if it can see them. For it,
+pictures and PDFs without text are read by OCR on this computer, never online.
 Whatever a model is not shown is named to it, so it never has to pretend.
 
 Attachments are added after the reference notes are chosen, so text inside a
@@ -24,7 +25,7 @@ from typing import Any, Optional
 
 from openjarvis.core.types import Message, Role
 from openjarvis.engine import google_common
-from openjarvis.server import attachments
+from openjarvis.server import attachments, ocr
 from openjarvis.server.attachments import Attachment
 
 logger = logging.getLogger("openjarvis.server.tutor")
@@ -40,6 +41,8 @@ GEMINI_TOTAL_CHARS = 200_000
 LOCAL_DOC_CHARS = 8_000
 LOCAL_TOTAL_CHARS = 12_000
 LOCAL_MAX_IMAGES = 4
+# Longest one reply waits for OCR; what is read is cached for later replies.
+LOCAL_OCR_SECONDS = 90.0
 _MIN_DOC_CHARS = 500
 # Upload again when a cached Gemini file has less than this left to live.
 EXPIRY_MARGIN_SECONDS = 600
@@ -329,16 +332,66 @@ def forget_uploads(file_ids: Sequence[str]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _read_by_ocr(attachment: Attachment, deadline: float) -> Optional[Attachment]:
+    """The file with the text OCR on this computer found, or ``None``.
+
+    Nothing is sent anywhere. The result is cached beside the file.
+    """
+    latest = attachments.load(attachment.id)
+    found = latest.ocr if latest else None
+    if not isinstance(found, dict) or not isinstance(found.get("text"), str):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        try:
+            result = ocr.local_ocr(
+                attachment.path.read_bytes(),
+                attachment.mime,
+                max_chars=LOCAL_DOC_CHARS,
+                seconds=remaining,
+            )
+        except Exception as exc:  # noqa: BLE001 — disclose it instead of failing
+            logger.warning("Could not read a file by OCR: %s", type(exc).__name__)
+            return None
+        found = {"text": result.text, "truncated": result.truncated}
+        # A reading cut off by the time limit is carried on by a later reply.
+        if not result.truncated or time.monotonic() < deadline:
+            attachments.set_ocr(attachment.id, found)
+    if not found["text"].strip():
+        return None
+    return replace(
+        attachment, text=found["text"], truncated=bool(found.get("truncated"))
+    )
+
+
+def _ocr_block(attachment: Attachment, limit: int) -> str:
+    """Text read by OCR, with what the model must know about it."""
+    if attachment.kind == "image":
+        kind = "picture"
+        unseen = "Unless you were also given the picture itself, you cannot see"
+    else:
+        kind = "PDF"
+        unseen = "You cannot see"
+    return (
+        f"[The text of this {kind} was read by OCR, may contain mistakes, and may "
+        f"be incomplete. {unseen} its figures, diagrams or graphs: say so if the "
+        "question depends on them and do not guess what they show.]\n"
+        + _document_block(attachment, limit)
+    )
+
+
 def for_local(messages: Sequence[Message]) -> list[Message]:
     """Messages with documents as text and pictures as images.
 
-    The caller removes the images again for a model that cannot see them.
+    Blocking, as OCR may run: call it off the event loop. The caller removes
+    the images again for a model that cannot see them.
     """
     texts: dict[int, list[str]] = {}
     images: dict[int, list[str]] = {}
     omitted: dict[int, list[str]] = {}
     text_left = LOCAL_TOTAL_CHARS
     pictures = 0
+    deadline = time.monotonic() + LOCAL_OCR_SECONDS
     for index, attachment in _newest_first(messages):
         if attachment.kind == "image":
             if pictures >= LOCAL_MAX_IMAGES:
@@ -352,7 +405,22 @@ def for_local(messages: Sequence[Message]) -> list[Message]:
                 continue
             pictures += 1
             images.setdefault(index, []).insert(0, base64.b64encode(data).decode())
-        elif not (attachment.text or "").strip():
+            if text_left >= _MIN_DOC_CHARS:
+                read = _read_by_ocr(attachment, deadline)
+                if read:
+                    limit = min(LOCAL_DOC_CHARS, text_left)
+                    text_left -= min(limit, len(read.text or ""))
+                    texts.setdefault(index, []).insert(0, _ocr_block(read, limit))
+            continue
+        block = _document_block
+        if attachment.kind == "pdf" and not (attachment.text or "").strip():
+            if text_left < _MIN_DOC_CHARS:
+                omitted.setdefault(index, []).insert(0, attachment.name)
+                continue
+            read = _read_by_ocr(attachment, deadline)
+            if read:
+                attachment, block = read, _ocr_block
+        if not (attachment.text or "").strip():
             texts.setdefault(index, []).insert(
                 0,
                 f'[The learner attached "{attachment.name}", but you cannot read it: '
@@ -365,7 +433,7 @@ def for_local(messages: Sequence[Message]) -> list[Message]:
                 omitted.setdefault(index, []).insert(0, attachment.name)
                 continue
             text_left -= min(limit, len(attachment.text or ""))
-            texts.setdefault(index, []).insert(0, _document_block(attachment, limit))
+            texts.setdefault(index, []).insert(0, block(attachment, limit))
 
     result: list[Message] = []
     for index, message in enumerate(messages):

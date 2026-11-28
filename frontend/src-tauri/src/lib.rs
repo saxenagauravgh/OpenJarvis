@@ -2916,6 +2916,12 @@ fn normalize_host(raw: &str) -> String {
     s.trim_end_matches('/').to_string()
 }
 
+/// Open the system print dialog, used to save answers as PDF.
+#[tauri::command]
+fn print_page(window: tauri::WebviewWindow) -> Result<(), String> {
+    window.print().map_err(|err| format!("Could not open the print dialog: {err}"))
+}
+
 /// Check speech backend health.
 #[tauri::command]
 async fn speech_health(api_url: String) -> Result<serde_json::Value, String> {
@@ -3431,6 +3437,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            print_page,
             get_setup_status,
             get_api_base,
             start_backend,

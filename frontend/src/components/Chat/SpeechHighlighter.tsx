@@ -13,12 +13,12 @@ interface ShownWord {
   end: number;
 }
 
-/** The visible words of a rendered answer, skipping typeset maths and code. */
+/** The visible words of an answer, skipping maths, code and its sources. */
 function shownWords(root: Element): ShownWord[] {
   const words: ShownWord[] = [];
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode: (node) =>
-      node.parentElement?.closest('.katex, pre, button')
+      node.parentElement?.closest('.katex, pre, button, [data-no-speech]')
         ? NodeFilter.FILTER_REJECT
         : NodeFilter.FILTER_ACCEPT,
   });

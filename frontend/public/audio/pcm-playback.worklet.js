@@ -94,7 +94,11 @@ class PcmPlayback extends AudioWorkletProcessor {
     for (let c = 1; c < channels.length; c += 1) channels[c].set(out);
 
     if (this.measured >= sampleRate * REPORT_SECONDS) {
-      this.port.postMessage({ type: 'level', level: Math.sqrt(this.energy / this.measured) });
+      this.port.postMessage({
+        type: 'level',
+        level: Math.sqrt(this.energy / this.measured),
+        remaining: this.count,
+      });
       this.energy = 0;
       this.measured = 0;
     }

@@ -9,7 +9,7 @@ import zipfile
 
 import pytest
 
-from openjarvis.server import attachments
+from openjarvis.server import attachments, ocr
 
 
 @pytest.fixture(autouse=True)
@@ -151,12 +151,23 @@ def test_pdf_text_is_kept_for_the_offline_model():
     assert stored.warning is None
 
 
-def test_pdf_without_text_is_accepted_with_a_warning():
+@pytest.mark.parametrize(
+    ("program", "expected"),
+    [
+        ("/usr/bin/tesseract", "reads it with OCR on this computer"),
+        (None, "Tesseract OCR is not installed"),
+    ],
+)
+def test_pdf_without_text_is_accepted_with_a_warning(monkeypatch, program, expected):
     pytest.importorskip("pdfplumber")
+    monkeypatch.setattr(ocr, "tesseract_path", lambda: program)
     stored = save(pdf(), "scan.pdf")
 
     assert stored.kind == "pdf" and not stored.text
-    assert "offline model cannot" in stored.warning
+    assert "online tutor can still read it" in stored.warning
+    assert expected in stored.warning
+    # Reading by OCR waits until the offline model needs it.
+    assert stored.ocr is None
 
 
 def test_docx_reads_paragraphs_tables_and_equations():
@@ -260,6 +271,15 @@ def test_same_content_is_stored_once_and_keeps_the_gemini_upload():
     assert second.id == first.id
     assert attachments.load(first.id).name == "b.txt"
     assert attachments.load(first.id).gemini == {"uri": "u"}
+
+
+def test_text_read_by_ocr_is_kept_when_a_file_is_uploaded_again():
+    found = {"text": "read", "truncated": False}
+    first = save(picture("PNG"), "a.png")
+    attachments.set_ocr(first.id, found)
+
+    assert save(picture("PNG"), "b.png").ocr == found
+    assert attachments.load(first.id).ocr == found
 
 
 @pytest.mark.parametrize(

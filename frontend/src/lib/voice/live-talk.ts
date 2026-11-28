@@ -3,6 +3,9 @@
  * said into it, and decides what happens when the session ends.
  */
 import { generateId, useAppStore } from '../store';
+import { useTtsStore } from '../tts';
+import { charIndexAtFraction } from '../caption';
+import { liveWebSearch } from '../chat/web';
 import { liveHistory } from './protocol';
 import { startLiveSession, type LiveEnd, type LiveStatus } from './session';
 import { initialTurns, reduceTurns, type TurnEvent } from './turns';
@@ -54,8 +57,25 @@ export function startLiveTalk(handlers: LiveTalkHandlers): LiveTalk {
     }
   };
 
+  /** Highlight, in the chat, the words being spoken. The timing is estimated. */
+  const highlight = (playback: { turnId: string; fraction: number } | null) => {
+    const turn = playback ? turns.turns[playback.turnId] : undefined;
+    const shown = useTtsStore.getState();
+    if (!playback || !turn?.assistantId || !turn.spoken.trim()) {
+      if (shown.caption) useTtsStore.setState({ caption: null, speakingId: null });
+      return;
+    }
+    const charIndex = charIndexAtFraction(turn.spoken, playback.fraction);
+    if (shown.caption?.text === turn.spoken && shown.caption.charIndex === charIndex) return;
+    useTtsStore.setState({
+      speakingId: turn.assistantId,
+      caption: { text: turn.spoken, charIndex },
+    });
+  };
+
   const onEnd = (end: LiveEnd) => {
     unsubscribe();
+    highlight(null);
     apply({ type: 'ended' });
     handlers.onEnd();
     if (end.reason === 'stopped') return;
@@ -81,13 +101,14 @@ export function startLiveTalk(handlers: LiveTalkHandlers): LiveTalk {
     app.conversations.find((c) => c.id === conversationId)?.messages ?? [],
   );
   const session = startLiveSession(
-    { history, adultConfirmed: app.adultConfirmed },
+    { history, adultConfirmed: app.adultConfirmed, webSearch: liveWebSearch(app.settings) },
     {
       onStatus: handlers.onStatus,
       onMessage: (message) => {
         if (message.type !== 'state' && message.type !== 'error') apply(message);
       },
       onEnd,
+      onPlayback: highlight,
     },
   );
 

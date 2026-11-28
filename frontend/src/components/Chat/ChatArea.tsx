@@ -9,7 +9,8 @@ import { stripThinkTags } from '../../lib/message-text';
 import { isSpeakableReply } from '../../lib/chat/history';
 import { continueTutorMessage, retryTutorMessage } from '../../lib/chat/sendTutorMessage';
 import { toast } from 'sonner';
-import { Sparkles, PanelRightOpen, PanelRightClose, Database, MessageSquare, X } from 'lucide-react';
+import { Sparkles, PanelRightOpen, PanelRightClose, Database, MessageSquare, X, FileDown } from 'lucide-react';
+import { saveAsPdf } from '../../lib/export-pdf';
 import { listConnectors } from '../../lib/connectors-api';
 
 function getGreeting(): string {
@@ -207,6 +208,27 @@ export function ChatArea() {
     <div className="flex flex-col h-full">
       {/* Toggle bar */}
       <div className="flex items-center justify-end px-3 py-1.5 shrink-0">
+        {!isEmpty && !isCurrentChatStreaming && (
+          <button
+            type="button"
+            onClick={() => {
+              const answers = messages.flatMap((m, i) =>
+                m.role === 'assistant'
+                  ? [{ messageId: m.id, question: messages[i - 1]?.role === 'user' ? messages[i - 1].content : undefined }]
+                  : [],
+              );
+              void saveAsPdf(messages[0]?.content.slice(0, 60) || 'Tutor notes', answers).catch(() =>
+                toast.error('Could not open the print dialog.'),
+              );
+            }}
+            className="p-1.5 rounded-md transition-colors cursor-pointer"
+            style={{ color: 'var(--color-text-tertiary)' }}
+            title="Save this chat as PDF"
+            aria-label="Save chat as PDF"
+          >
+            <FileDown size={16} />
+          </button>
+        )}
         {developerMode && (
         <button
           onClick={toggleSystemPanel}

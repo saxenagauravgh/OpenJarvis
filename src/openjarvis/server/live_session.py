@@ -2,7 +2,7 @@
 
 The wire protocol is described in ``voice_routes``. This module owns what
 happens after the handshake: relaying audio both ways, turning model messages
-into client events, answering the two tools, and reconnecting to Gemini (with
+into client events, answering the tools, and reconnecting to Gemini (with
 the latest resumption handle, or afresh with a recap) when the connection ends.
 
 The connect function is injected: ``connect(config)`` returns an async context
@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from typing import Any, Optional, Union
 
 from openjarvis.engine import google_common
-from openjarvis.server import tutor_knowledge, tutor_settings
+from openjarvis.server import tutor_knowledge, tutor_search, tutor_settings
 
 logger = logging.getLogger("openjarvis.server.voice")
 
@@ -126,13 +126,16 @@ def system_instruction(persona: str, history: Sequence[Turn]) -> str:
     parts = [
         persona,
         _core_method(),
+        tutor_knowledge.PRESENTATION_GUIDE,
         f"{_RECAP_HEADER}\n{earlier}" if earlier else "",
         _VOICE_RULES,
     ]
     return "\n\n".join(part for part in parts if part)
 
 
-def live_config(instruction: str, handle: Optional[str]) -> Any:
+def live_config(
+    instruction: str, handle: Optional[str], *, web_search: bool = True
+) -> Any:
     """A fresh ``LiveConnectConfig`` (the SDK modifies the one it is given)."""
     from google.genai import types
 
@@ -155,6 +158,13 @@ def live_config(instruction: str, handle: Optional[str]) -> Any:
     settings = types.FunctionDeclaration(
         **tutor_settings.declaration(), behavior=types.Behavior.NON_BLOCKING
     )
+    declarations = [board, settings]
+    if web_search:
+        declarations.append(
+            types.FunctionDeclaration(
+                **tutor_search.declaration(), behavior=types.Behavior.NON_BLOCKING
+            )
+        )
     return types.LiveConnectConfig(
         response_modalities=[types.Modality.AUDIO],
         system_instruction=instruction,
@@ -169,7 +179,7 @@ def live_config(instruction: str, handle: Optional[str]) -> Any:
         context_window_compression=types.ContextWindowCompressionConfig(
             sliding_window=types.SlidingWindow()
         ),
-        tools=[types.Tool(function_declarations=[board, settings])],
+        tools=[types.Tool(function_declarations=declarations)],
     )
 
 
@@ -265,10 +275,12 @@ class LiveBridge:
         *,
         persona: str = "",
         history: Sequence[Turn] = (),
+        web_search: bool = True,
     ) -> None:
         self._client = client
         self._connect = connect
         self._persona = persona
+        self._web_search = web_search
         self._history: deque[Turn] = deque(history, maxlen=100)
         #: Set once everything belonging to this conversation has been released.
         self.closed = asyncio.Event()
@@ -298,6 +310,12 @@ class LiveBridge:
         self._turn_has_audio = False
         self._follow_up_due = False
         self._awaiting_follow_up = False
+        #: A search was asked for and its spoken answer has not started yet.
+        self._search_answer_due = False
+        #: Tasks of searches in progress, by call id.
+        self._searches: dict[str, asyncio.Task] = {}
+        #: The turn of each search whose results Gemini does not have yet.
+        self._unanswered: dict[str, int] = {}
         self._heard: list[str] = []
         self._said: list[str] = []
 
@@ -513,7 +531,11 @@ class LiveBridge:
                 self._instruction = system_instruction(self._persona, self._history)
             context = None
             try:
-                context = self._connect(live_config(self._instruction, self._handle))
+                context = self._connect(
+                    live_config(
+                        self._instruction, self._handle, web_search=self._web_search
+                    )
+                )
                 session = await asyncio.wait_for(
                     context.__aenter__(), CONNECT_TIMEOUT_SECONDS
                 )
@@ -591,7 +613,11 @@ class LiveBridge:
                 return
             next(iter(done)).result()
         finally:
-            await self._cancel(tasks)
+            # A search result can only go back to the connection that asked.
+            searches = list(self._searches.values())
+            self._searches.clear()
+            self._unanswered.clear()
+            await self._cancel([*tasks, *searches])
 
     async def _go_away_deadline(self, announced: asyncio.Event) -> None:
         await announced.wait()
@@ -667,17 +693,29 @@ class LiveBridge:
                 self._purge_audio()
                 self._emit({"type": "interrupted", "turnId": self._turn_id})
 
+        cancelled = message.tool_call_cancellation
+        for call_id in (cancelled and cancelled.ids) or []:
+            search = self._searches.pop(call_id, None)
+            if search:
+                search.cancel()
+                self._unanswered.pop(call_id, None)
+                self._search_answer_due = False
+
         calls = message.tool_call and message.tool_call.function_calls
         for call in calls or []:
             await self._answer_call(session, call)
 
         if content and content.turn_complete:
             self._completed_turn = True
-            if self._follow_up_due and not self._turn_has_audio:
-                # Only a tool was used so far; the spoken answer follows and
-                # belongs to this same turn.
-                self._follow_up_due = False
+            searching = (
+                self._search_answer_due or self._turn_id in self._unanswered.values()
+            )
+            if searching or (self._follow_up_due and not self._turn_has_audio):
+                # Only a tool was used so far, or search results are still to be
+                # spoken about; that answer belongs to this same turn.
+                self._follow_up_due = self._search_answer_due = False
                 self._awaiting_follow_up = True
+                self._turn_has_audio = False
             else:
                 self._end_turn()
 
@@ -704,12 +742,16 @@ class LiveBridge:
         self._turn_id += 1
         self._turn_active = self._turn_has_audio = False
         self._follow_up_due = self._awaiting_follow_up = False
+        self._search_answer_due = False
 
     async def _answer_call(self, session: Any, call: Any) -> None:
         from google.genai import types
 
         self._turn_active = True
         args = call.args or {}
+        if call.name == tutor_search.TOOL_NAME and self._web_search:
+            self._start_search(session, call, args)
+            return
         if call.name == BOARD_TOOL_NAME:
             response = self._show_on_board(args)
         elif call.name == tutor_settings.TOOL_NAME:
@@ -732,6 +774,59 @@ class LiveBridge:
                 id=call.id, name=call.name, response=response, scheduling=scheduling
             )
         )
+
+    def _start_search(self, session: Any, call: Any, args: dict[str, Any]) -> None:
+        """Search in the background, so that speech keeps flowing meanwhile."""
+        query = tutor_search.clean_query(args.get("query"))
+        turn_id = self._turn_id
+        self._search_answer_due = True
+        if query:
+            self._emit({"type": "searching", "turnId": turn_id, "query": query})
+        key = call.id or f"search-{turn_id}-{len(self._searches)}"
+        self._unanswered[key] = turn_id
+        task = asyncio.create_task(self._search(session, call, key, query, turn_id))
+        self._searches[key] = task
+        task.add_done_callback(lambda _: self._searches.pop(key, None))
+
+    async def _search(
+        self, session: Any, call: Any, key: str, query: str, turn_id: int
+    ) -> None:
+        from google.genai import types
+
+        try:
+            try:
+                results = await tutor_search.search(query)
+            except Exception as exc:  # noqa: BLE001 — the tutor answers without it
+                logger.warning("Voice web search failed: %s", type(exc).__name__)
+                results = []
+            if results:
+                self._emit(
+                    {
+                        "type": "sources",
+                        "turnId": turn_id,
+                        "items": tutor_search.sources(results),
+                    }
+                )
+                block = tutor_search.reference_block(results, spoken=True)
+                response = {"result": block}
+            else:
+                response = {"error": tutor_search.UNAVAILABLE}
+            self._last_activity = time.monotonic()
+            # Cleared before sending: the answer may end the turn straight away.
+            self._unanswered.pop(key, None)
+            await asyncio.wait_for(
+                session.send_tool_response(
+                    function_responses=types.FunctionResponse(
+                        id=call.id,
+                        name=call.name,
+                        response=response,
+                        scheduling=types.FunctionResponseScheduling.WHEN_IDLE,
+                    )
+                ),
+                SEND_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:  # noqa: BLE001 — receiving notices a lost session
+            google_common.log_failure(logger, "Could not return search results", exc)
 
     def _show_on_board(self, args: dict[str, Any]) -> dict[str, str]:
         markdown = str(args.get("markdown") or "").strip()

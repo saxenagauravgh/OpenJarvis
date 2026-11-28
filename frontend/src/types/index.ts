@@ -139,6 +139,29 @@ export interface ChatAttachment {
   kind: 'image' | 'pdf' | 'text';
 }
 
+/** A web page a reply drew on. */
+export interface WebSource {
+  title: string;
+  url: string;
+}
+
+export type TeamMember = 'physics' | 'chemistry' | 'maths' | 'solver' | 'checker';
+
+/** How one member of the expert team is getting on with a reply. */
+export interface TeamProgress {
+  member: TeamMember;
+  label: string;
+  status: 'working' | 'done' | 'failed';
+}
+
+/** The Web and Expert team pills as they were when a question was sent. */
+export interface TutorChoices {
+  web: boolean;
+  /** Also open the top search results and read them. */
+  deep?: boolean;
+  team: boolean;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -157,6 +180,16 @@ export interface ChatMessage {
   attachments?: string[];
   error?: MessageError;
   notices?: MessageNotice[];
+  /** On a question, kept so that Retry and Continue ask in the same way. */
+  choices?: TutorChoices;
+  /** The web search a reply is waiting for; cleared once it moves on. */
+  searching?: string;
+  /** Everything searched for while replying. */
+  webSearches?: string[];
+  /** Web pages shown under a reply; never sent back as history. */
+  webSources?: WebSource[];
+  /** Progress of the expert team on this reply. */
+  team?: TeamProgress[];
   /** A settings change proposed with this reply. */
   action?: SettingAction;
   finishReason?: FinishReason;
