@@ -1,10 +1,11 @@
 import { useEffect, useRef } from 'react';
 import { subscribeLevel } from '../../lib/voice-level';
 
-export type OrbState = 'idle' | 'listening' | 'transcribing' | 'thinking' | 'speaking';
+export type OrbState = 'idle' | 'connecting' | 'listening' | 'transcribing' | 'thinking' | 'speaking';
 
 const STATUS: Record<OrbState, string> = {
   idle: 'Standing by',
+  connecting: 'Connecting',
   listening: 'Listening',
   transcribing: 'Processing speech',
   thinking: 'Analysing',

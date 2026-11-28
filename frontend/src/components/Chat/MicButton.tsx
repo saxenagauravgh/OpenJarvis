@@ -5,7 +5,7 @@ interface MicButtonProps {
   state: SpeechState;
   onClick: () => void;
   disabled?: boolean;
-  reason?: 'not-enabled' | 'no-backend' | 'streaming';
+  reason?: 'not-enabled' | 'no-backend' | 'streaming' | 'live';
 }
 
 export function MicButton({ state, onClick, disabled, reason }: MicButtonProps) {
@@ -18,6 +18,8 @@ export function MicButton({ state, onClick, disabled, reason }: MicButtonProps) 
         ? 'Speech backend not configured'
         : reason === 'streaming'
           ? 'Wait for response'
+          : reason === 'live'
+            ? 'Talk is already listening'
           : state === 'recording'
             ? 'Stop recording'
             : state === 'transcribing'

@@ -11,10 +11,12 @@ import { MicButton } from './MicButton';
 import { VoiceOrb, type OrbState } from './VoiceOrb';
 import { isEcho } from '../../lib/voice-detector';
 import { useSpeech } from '../../hooks/useSpeech';
+import { useLiveVoice } from '../../hooks/useLiveVoice';
 import { useAttachments } from '../../hooks/useAttachments';
 import { AttachmentChip } from './AttachmentChip';
 import { FILE_ACCEPT, MAX_FILES } from '../../lib/chat/attachments';
 import { useTtsStore } from '../../lib/tts';
+import { MAX_LIVE_TEXT_CHARS } from '../../lib/voice/protocol';
 import type {
   ChatMessage,
   MessageError,
@@ -137,6 +139,9 @@ export function InputArea() {
     listen,
     hearing,
   } = useSpeech();
+  const live = useLiveVoice();
+  const liveActive = live.status !== null;
+  const talkVoice = useAppStore((s) => s.settings.talkVoice);
   const conversationMode = useAppStore((s) => s.conversationMode);
   const setConversationMode = useAppStore((s) => s.setConversationMode);
   const ttsState = useTtsStore((s) => s.state);
@@ -160,9 +165,10 @@ export function InputArea() {
     prevModelRef.current = selectedModel;
   }, [selectedModel, streamState.isStreaming, resetStream]);
 
-  const micDisabled = !speechEnabled || !speechAvailable || streamState.isStreaming;
-  const micReason: 'not-enabled' | 'no-backend' | 'streaming' | undefined =
-    !speechEnabled ? 'not-enabled'
+  const micDisabled = !speechEnabled || !speechAvailable || streamState.isStreaming || liveActive;
+  const micReason: 'not-enabled' | 'no-backend' | 'streaming' | 'live' | undefined =
+    liveActive ? 'live'
+    : !speechEnabled ? 'not-enabled'
     : !speechAvailable ? 'no-backend'
     : streamState.isStreaming ? 'streaming'
     : undefined;
@@ -208,6 +214,18 @@ export function InputArea() {
   /** Send the typed or spoken question; resolves with the finished reply. */
   const sendMessage = useCallback(async (spokenText?: string): Promise<ChatMessage | null> => {
     const typed = (spokenText ?? input).trim();
+    // During a live session, typed messages are part of that conversation.
+    if (live.isActive()) {
+      if (attachedCount > 0) {
+        toast.warning('Files need the normal chat. Stop Talk to send them.');
+      } else if (typed.length > MAX_LIVE_TEXT_CHARS) {
+        toast.warning('That is too long to send during Talk. Stop Talk to send it.');
+      } else if (typed) {
+        if (live.sendText(typed)) setInput('');
+        else toast('Live voice is still connecting. Send again in a moment.');
+      }
+      return null;
+    }
     if (streamState.isStreaming) return null;
 
     if (!deepResearch && isUploading()) {
@@ -523,6 +541,7 @@ export function InputArea() {
     setStreamState,
     resetStream,
     deepResearch,
+    live,
   ]);
 
   // ── Conversation mode: listen → send → speak → listen again ──────────
@@ -569,13 +588,13 @@ export function InputArea() {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && useTtsStore.getState().state !== 'idle') {
-        interruptJarvis();
-      }
+      if (event.key !== 'Escape') return;
+      live.flush();
+      if (useTtsStore.getState().state !== 'idle') interruptJarvis();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [interruptJarvis]);
+  }, [interruptJarvis, live]);
 
   const pauseConversation = useCallback((message?: string) => {
     setPhase('idle');
@@ -657,14 +676,8 @@ export function InputArea() {
   // Leaving the chat page must release the microphone.
   useEffect(() => () => cancelRecording(), [cancelRecording]);
 
-  const toggleConversation = useCallback(() => {
-    // A reply still in flight belongs to the previous session.
-    talkTurnRef.current += 1;
-    if (conversationMode) {
-      setConversationMode(false);
-      useTtsStore.getState().stop();
-      return;
-    }
+  /** Start the Standard voice loop (speech to text, chat, the Mac's voice). */
+  const startStandard = useCallback(() => {
     if (!speechAvailable) {
       toast.error('Speech recognition is not available. Check that the OpenJarvis backend is running.');
       return;
@@ -677,10 +690,40 @@ export function InputArea() {
     useTtsStore.getState().stop();
     void useTtsStore.getState().ensureHealth();
     setConversationMode(true);
-  }, [conversationMode, speechAvailable, selectedModel, setConversationMode]);
+  }, [speechAvailable, selectedModel, setConversationMode]);
+  // A live session may fall back after these have changed.
+  const startStandardRef = useRef(startStandard);
+  useEffect(() => {
+    startStandardRef.current = startStandard;
+  }, [startStandard]);
 
-  const orbState: OrbState =
-    conversationPhase === 'listening'
+  const toggleConversation = useCallback(() => {
+    // A reply still in flight belongs to the previous session.
+    talkTurnRef.current += 1;
+    if (live.isActive()) {
+      live.stop();
+      return;
+    }
+    if (conversationMode) {
+      setConversationMode(false);
+      useTtsStore.getState().stop();
+      return;
+    }
+    if (talkVoice !== 'live') {
+      startStandard();
+      return;
+    }
+    // Nothing else may talk or use the microphone during a live session.
+    useTtsStore.getState().stop();
+    cancelRecording();
+    if (useAppStore.getState().streamState.isStreaming) stopStreaming();
+    live.start(() => startStandardRef.current());
+  }, [conversationMode, talkVoice, live, startStandard, setConversationMode, cancelRecording, stopStreaming]);
+
+  const talking = conversationMode || liveActive;
+  const orbState: OrbState = live.status
+    ? live.status.phase
+    : conversationPhase === 'listening'
       ? speechState === 'transcribing' ? 'transcribing' : 'listening'
       : ttsState === 'speaking' || ttsState === 'loading'
         ? 'speaking'
@@ -688,7 +731,9 @@ export function InputArea() {
           ? 'thinking'
           : 'idle';
 
-  const conversationLabel = !conversationMode
+  const conversationLabel = live.status
+    ? { connecting: 'Connecting…', listening: 'Listening…', speaking: 'Jarvis speaking…' }[live.status.phase]
+    : !conversationMode
     ? 'Talk'
     : conversationPhase === 'listening'
       ? speechState === 'transcribing' ? 'Got it…' : 'Listening…'
@@ -759,31 +804,34 @@ export function InputArea() {
           <button
             type="button"
             onClick={toggleConversation}
-            aria-pressed={conversationMode}
+            aria-pressed={talking}
             className="hud-pill inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs transition-colors cursor-pointer"
             style={{
-              background: conversationMode ? 'var(--color-accent-subtle)' : 'transparent',
-              border: `1px solid ${conversationMode ? 'var(--color-accent)' : 'var(--color-border)'}`,
-              color: conversationMode ? 'var(--color-accent)' : 'var(--color-text-tertiary)',
+              background: talking ? 'var(--color-accent-subtle)' : 'transparent',
+              border: `1px solid ${talking ? 'var(--color-accent)' : 'var(--color-border)'}`,
+              color: talking ? 'var(--color-accent)' : 'var(--color-text-tertiary)',
             }}
-            title={conversationMode ? 'Stop the voice conversation' : 'Talk to Jarvis hands-free: speak, pause, and it answers aloud'}
+            title={talking ? 'Stop the voice conversation' : 'Talk to Jarvis hands-free: speak, pause, and it answers aloud'}
           >
-            <AudioLines size={12} className={conversationMode ? 'animate-pulse' : undefined} />
+            <AudioLines size={12} className={talking ? 'animate-pulse' : undefined} />
             {conversationLabel}
           </button>
           {/* A small orb at the end of this row, while voice is in use. */}
-          {(conversationMode || ttsState !== 'idle') && (
+          {(talking || ttsState !== 'idle') && (
             <button
               type="button"
-              onClick={interruptJarvis}
+              onClick={() => {
+                live.flush();
+                interruptJarvis();
+              }}
               className="voice-orb-compact ml-auto cursor-pointer"
               title="Click (or press Esc) to stop Jarvis and talk"
               aria-label="Stop Jarvis and talk"
             >
               <VoiceOrb
-                state={conversationMode ? orbState : 'speaking'}
+                state={talking ? orbState : 'speaking'}
                 size={52}
-                hearing={hearing}
+                hearing={live.status ? live.status.hearing : hearing}
               />
             </button>
           )}
@@ -875,7 +923,7 @@ export function InputArea() {
                 sendBlockedByUpload ||
                 !canSend ||
                 modelLoading ||
-                !selectedModel
+                (!selectedModel && !liveActive)
               }
               title={
                 !selectedModel

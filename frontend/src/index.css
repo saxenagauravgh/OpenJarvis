@@ -831,8 +831,10 @@
 .voice-orb-wrap[data-state='listening'] .voice-orb-ripple--late { animation-delay: 1s; }
 
 /* Processing / thinking: rings accelerate */
+.voice-orb-wrap[data-state='connecting'] .voice-orb-ring--arc,
 .voice-orb-wrap[data-state='transcribing'] .voice-orb-ring--arc,
 .voice-orb-wrap[data-state='thinking'] .voice-orb-ring--arc { animation-duration: 1.1s; }
+.voice-orb-wrap[data-state='connecting'] .voice-orb-ring--outer,
 .voice-orb-wrap[data-state='transcribing'] .voice-orb-ring--outer,
 .voice-orb-wrap[data-state='thinking'] .voice-orb-ring--outer { animation-duration: 5s; }
 .voice-orb-wrap[data-state='thinking'] .voice-orb-core { opacity: 0.8; animation-duration: 1.4s; }
