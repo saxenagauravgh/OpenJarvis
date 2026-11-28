@@ -80,3 +80,14 @@ describe('updateTeam', () => {
     ]);
   });
 });
+
+describe('deep search', () => {
+  const settings = { webSearchEnabled: true, webAlways: false, expertTeam: false, webDeep: true };
+  it('asks the server to read pages, unless searching is off or the message is spoken', async () => {
+    const { requestOptions, tutorChoices } = await import('./web');
+    expect(requestOptions(tutorChoices(settings), settings).webSearch).toBe('deep');
+    expect(requestOptions(tutorChoices(settings, true), settings).webSearch).toBe('auto');
+    const off = { ...settings, webSearchEnabled: false };
+    expect(requestOptions(tutorChoices(settings), off).webSearch).toBe('off');
+  });
+});

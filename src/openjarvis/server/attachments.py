@@ -1,9 +1,10 @@
 """Files that stay with a tutor conversation: storage, sniffing and text.
 
 Each file is kept as ``<config dir>/attachments/<sha256>`` with a
-``<sha256>.json`` sidecar (name, type, extracted text and the cached Gemini
-upload). The type comes from the content alone. Files are capped in size, and
-the least recently used are removed once the store grows past its total cap.
+``<sha256>.json`` sidecar (name, type, extracted text, text read by OCR and the
+cached Gemini upload). The type comes from the content alone. Files are capped
+in size, and the least recently used are removed once the store grows past its
+total cap.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Optional
 
 from openjarvis.core.paths import get_config_dir
+from openjarvis.server import ocr
 
 logger = logging.getLogger("openjarvis.server.attachments")
 
@@ -83,6 +85,8 @@ class Attachment:
     pages: Optional[int] = None
     #: The cached Gemini Files API upload, if any.
     gemini: Optional[dict[str, Any]] = None
+    #: ``{"text", "truncated"}`` once OCR on this computer has read the file.
+    ocr: Optional[dict[str, Any]] = None
 
     def public(self) -> dict[str, Any]:
         return {
@@ -163,6 +167,7 @@ def _from_sidecar(root: Path, file_id: str, data: dict[str, Any]) -> Attachment:
         truncated=bool(data.get("truncated")),
         pages=data.get("pages"),
         gemini=data.get("gemini"),
+        ocr=data.get("ocr"),
     )
 
 
@@ -184,6 +189,15 @@ def load(file_id: str) -> Optional[Attachment]:
 
 def set_gemini_upload(file_id: str, upload: Optional[dict[str, Any]]) -> None:
     """Remember (or forget) the Gemini upload of a stored file."""
+    _set_field(file_id, "gemini", upload)
+
+
+def set_ocr(file_id: str, found: dict[str, Any]) -> None:
+    """Remember the text OCR read from a stored file."""
+    _set_field(file_id, "ocr", found)
+
+
+def _set_field(file_id: str, field: str, value: Optional[dict[str, Any]]) -> None:
     if not _ID.fullmatch(file_id):
         return
     root = storage_dir()
@@ -191,7 +205,7 @@ def set_gemini_upload(file_id: str, upload: Optional[dict[str, Any]]) -> None:
         data = _read_sidecar(root, file_id)
         if data is None:
             return
-        data["gemini"] = upload
+        data[field] = value
         try:
             _write_sidecar(root, file_id, data)
         except OSError:
@@ -230,6 +244,7 @@ def save(stream: BinaryIO, name: Optional[str]) -> Attachment:
                 "truncated": found.truncated,
                 "pages": found.pages,
                 "gemini": previous.get("gemini"),
+                "ocr": previous.get("ocr"),
             }
             os.replace(tmp, root / file_id)
             os.utime(root / file_id)
@@ -340,11 +355,23 @@ def _inspect_image(path: Path, mime: str) -> _Inspection:
     return _Inspection("image", mime, warning=warning)
 
 
-def _inspect_pdf(path: Path) -> _Inspection:
-    no_text = (
-        "No text could be read from this PDF (it may be scanned). The online "
-        "tutor can still read it, but the offline model cannot."
+def _no_text_warning() -> str:
+    start = (
+        "This PDF has no text that can be copied (it may be scanned). The online "
+        "tutor can still read it. "
     )
+    if ocr.tesseract_path() is None:
+        return start + (
+            "The offline model cannot, because Tesseract OCR is not installed on "
+            "this computer."
+        )
+    return start + (
+        "The offline model reads it with OCR on this computer, which may contain "
+        "mistakes and cannot show it any figures."
+    )
+
+
+def _inspect_pdf(path: Path) -> _Inspection:
     try:
         import pdfplumber
     except ImportError:
@@ -397,7 +424,7 @@ def _inspect_pdf(path: Path) -> _Inspection:
     return _Inspection(
         "pdf",
         "application/pdf",
-        warning=None if full else no_text,
+        warning=None if full else _no_text_warning(),
         text=full[:MAX_TEXT_CHARS],
         truncated=truncated or len(full) > MAX_TEXT_CHARS,
         pages=pages,
@@ -617,6 +644,7 @@ __all__ = [
     "load",
     "save",
     "set_gemini_upload",
+    "set_ocr",
     "storage_dir",
     "too_large",
 ]

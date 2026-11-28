@@ -101,7 +101,7 @@ def declared(call: dict[str, Any]) -> list[str]:
 # -- search() ---------------------------------------------------------------
 
 
-def test_search_uses_only_duckduckgo_and_cleans_results(web):
+def test_search_starts_with_duckduckgo_and_cleans_results(web):
     web.results = [
         {"title": "ftp", "href": "ftp://example.org/x", "body": "no"},
         {"title": "js", "href": "javascript:alert(1)", "body": "no"},
@@ -128,6 +128,26 @@ def test_search_uses_only_duckduckgo_and_cleans_results(web):
     assert options["backend"] == "duckduckgo"
     assert query == "torque units"
     assert len(query) <= tutor_search.MAX_QUERY_CHARS
+
+
+def test_second_engine_is_used_when_the_first_finds_nothing(web, monkeypatch):
+    calls = []
+
+    class Engines:
+        def __init__(self, **_):
+            pass
+
+        def text(self, query, *, backend, max_results):
+            calls.append(backend)
+            if backend == "duckduckgo":
+                raise RuntimeError("No results found.")
+            return [{"title": "t", "href": "https://a.test/", "body": "b"}]
+
+    import ddgs
+
+    monkeypatch.setattr(ddgs, "DDGS", Engines)
+    assert asyncio.run(tutor_search.search("q"))[0]["url"] == "https://a.test/"
+    assert calls == ["duckduckgo", "yahoo"]
 
 
 def test_search_without_results_or_with_a_failure(web):

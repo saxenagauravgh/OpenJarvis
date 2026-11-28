@@ -336,3 +336,30 @@ describe('a live session', () => {
     expect(saved.messages[0]).toMatchObject({ content: 'Half', stopped: true });
   });
 });
+
+describe('highlighting in live voice', () => {
+  it('follows the spoken reply as it plays and clears afterwards', async () => {
+    const { socket, store } = await begin();
+    const { useTtsStore } = await import('../tts');
+    socket().ready();
+    socket().receive({
+      type: 'transcript',
+      turnId: 1,
+      role: 'assistant',
+      delta: 'Force equals mass times acceleration.',
+    });
+    socket().receive(new ArrayBuffer(4800)); // 2400 samples of reply audio
+    const playback = nodes['pcm-playback'].port;
+    playback.onmessage!({ data: { type: 'level', level: 0.2, remaining: 1200 } });
+
+    const reply = last(store.getState().messages) as { id: string; role: string };
+    expect(reply.role).toBe('assistant');
+    expect(useTtsStore.getState().speakingId).toBe(reply.id);
+    const caption = useTtsStore.getState().caption!;
+    expect(caption.charIndex).toBeGreaterThan(0);
+    expect(caption.charIndex).toBeLessThan(caption.text.length);
+
+    playback.onmessage!({ data: { type: 'drained' } });
+    expect(useTtsStore.getState().caption).toBeNull();
+  });
+});

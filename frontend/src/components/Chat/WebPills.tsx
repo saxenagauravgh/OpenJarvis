@@ -1,5 +1,5 @@
 /** The composer's "Web" and "Expert team" switches. */
-import { Globe, Users, type LucideIcon } from 'lucide-react';
+import { Globe, Telescope, Users, type LucideIcon } from 'lucide-react';
 import { useAppStore } from '../../lib/store';
 
 function Pill({
@@ -41,8 +41,10 @@ export function WebPills() {
   const enabled = useAppStore((s) => s.settings.webSearchEnabled);
   const webAlways = useAppStore((s) => s.settings.webAlways);
   const expertTeam = useAppStore((s) => s.settings.expertTeam);
+  const webDeep = useAppStore((s) => s.settings.webDeep);
   const updateSettings = useAppStore((s) => s.updateSettings);
   const web = enabled && webAlways;
+  const deep = enabled && webDeep;
 
   return (
     <>
@@ -53,12 +55,20 @@ export function WebPills() {
         disabled={!enabled}
         title={
           !enabled
-            ? 'Web search is turned off in Settings. It sends your question to the DuckDuckGo search engine.'
+            ? 'Web search is turned off in Settings. It sends your question to a free search engine (DuckDuckGo, or Yahoo).'
             : web
-              ? 'Web: on. Each typed question is sent to the DuckDuckGo search engine.'
-              : 'Web: search for every typed question. This sends your question to the DuckDuckGo search engine. While off, the tutor may still search when it needs to.'
+              ? 'Web: on. Each typed question is sent to a free search engine (DuckDuckGo, or Yahoo).'
+              : 'Web: search for every typed question. This sends your question to a free search engine (DuckDuckGo, or Yahoo). While off, the tutor may still search when it needs to.'
         }
         onClick={() => updateSettings({ webAlways: !webAlways })}
+      />
+      <Pill
+        label="Deep"
+        icon={Telescope}
+        on={deep}
+        disabled={!enabled}
+        title={`Deep search${deep ? ': on' : ''}. Searches for your question and reads the top pages before answering. Slower.`}
+        onClick={() => updateSettings({ webDeep: !webDeep })}
       />
       <Pill
         label="Expert team"

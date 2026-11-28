@@ -38,6 +38,11 @@ export interface LiveSessionCallbacks {
   onMessage: (message: ServerMessage) => void;
   /** Called exactly once. */
   onEnd: (end: LiveEnd) => void;
+  /**
+   * How far the reply being played has got (0 to 1), or null when nothing is
+   * playing. Used to highlight the words being spoken.
+   */
+  onPlayback?: (playback: { turnId: string; fraction: number } | null) => void;
 }
 
 export interface LiveSession {
@@ -140,9 +145,16 @@ export function startLiveSession(
 
   const fail = (message: string, code?: string) => end({ reason: 'failed', message, code });
 
+  // The reply now in the speaker: its samples sent so far and its turn.
+  let pushed = 0;
+  let playingTurn: string | undefined;
+  let newReply = true;
+
   const silence = () => {
     playback?.port.postMessage({ type: 'flush' });
     speaking = false;
+    newReply = true;
+    callbacks.onPlayback?.(null);
     publishLevel(0);
   };
 
@@ -174,6 +186,8 @@ export function startLiveSession(
       replying = muted = false;
       replyTurn = undefined;
     } else if (message.type === 'turn_complete') {
+      // Its audio may still be playing; the next audio belongs to a new reply.
+      newReply = true;
       replying = muted = false;
       replyTurn = undefined;
     } else {
@@ -183,6 +197,7 @@ export function startLiveSession(
       if (message.type !== 'transcript' || message.role === 'assistant') {
         replying = true;
         replyTurn = message.turnId;
+        if (!newReply) playingTurn ??= message.turnId;
       }
     }
     callbacks.onMessage(message);
@@ -192,6 +207,12 @@ export function startLiveSession(
   const onAudio = (pcm: ArrayBuffer) => {
     replying = true;
     if (muted || !playback || !pcm.byteLength) return;
+    if (newReply) {
+      newReply = false;
+      pushed = 0;
+      playingTurn = replyTurn;
+    }
+    pushed += pcm.byteLength >> 1;
     playback.port.postMessage({ type: 'audio', pcm }, [pcm]);
     speaking = true;
     report();
@@ -272,9 +293,14 @@ export function startLiveSession(
       if (data.type === 'level') {
         speaking = true;
         publishLevel(data.level * 4);
+        if (playingTurn !== undefined && pushed > 0) {
+          const fraction = 1 - Math.min(data.remaining ?? 0, pushed) / pushed;
+          callbacks.onPlayback?.({ turnId: playingTurn, fraction });
+        }
       } else if (data.type === 'drained') {
         speaking = false;
         publishLevel(0);
+        callbacks.onPlayback?.(null);
       }
       report();
     };

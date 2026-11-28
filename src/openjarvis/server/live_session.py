@@ -126,6 +126,7 @@ def system_instruction(persona: str, history: Sequence[Turn]) -> str:
     parts = [
         persona,
         _core_method(),
+        tutor_knowledge.PRESENTATION_GUIDE,
         f"{_RECAP_HEADER}\n{earlier}" if earlier else "",
         _VOICE_RULES,
     ]

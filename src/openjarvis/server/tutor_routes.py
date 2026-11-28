@@ -61,6 +61,7 @@ from openjarvis.server import (
     attachments,
     cloud_router,
     tutor_attachments,
+    tutor_browse,
     tutor_search,
     tutor_settings,
     tutor_team,
@@ -72,6 +73,7 @@ from openjarvis.server.routes import (
     _uses_direct_cloud_router,
 )
 from openjarvis.server.tutor_knowledge import (
+    PRESENTATION_GUIDE,
     add_to_system,
     select_notes,
     uploaded_excerpts,
@@ -111,6 +113,13 @@ _SEARCH_EMPTY = (
     "The web search found nothing to use, so this answer does not use the web."
 )
 _NO_QUERY = "There was nothing to search the web for."
+_PAGE_FAILED = "That link could not be opened, so this answer does not use it."
+_PAGE_UNREAD = (
+    "## Web page\n"
+    "The linked page could not be opened. Say so, do not guess what it contains, "
+    "and offer to help if the learner pastes the text."
+)
+_DEEP_PAGES = 4
 _TEAM_NEEDS_GEMINI = (
     "The expert team needs a Gemini model, so the tutor is answering on its own."
 )
@@ -132,13 +141,13 @@ class TutorChatRequest(BaseModel):
     messages: List[TutorMessage]
     # Deliberately untyped: only a literal JSON ``true`` confirms.
     adultConfirmed: Any = False
-    webSearch: Literal["auto", "always", "off"] = "auto"
+    webSearch: Literal["auto", "always", "deep", "off"] = "auto"
     team: bool = False
 
 
 @dataclass(frozen=True)
 class _Options:
-    web_search: str = "off"  # "auto" | "always" | "off"
+    web_search: str = "off"  # "auto" | "always" | "deep" | "off"
     team: bool = False
     #: What the learner typed, oldest first, without anything the server added.
     typed: tuple[str, ...] = ()
@@ -215,7 +224,7 @@ def _conversation(turns: list[TutorMessage]) -> list[Message]:
 def _with_reference_notes(messages: list[Message]) -> list[Message]:
     """Append the relevant subject and teaching notes to the system prompt."""
     questions = [m.text for m in messages if m.role == Role.USER and m.text]
-    parts: list[str] = []
+    parts: list[str] = [PRESENTATION_GUIDE]
     try:
         parts.append(select_notes(questions))
     except Exception:
@@ -238,8 +247,10 @@ def _without_images(messages: list[Message]) -> list[Message]:
         if message.images:
             note = (
                 f"[The learner attached {len(message.images)} image(s). You cannot "
-                "see images. Say so plainly, do not guess or invent what they show, "
-                "and ask the learner to type out the question.]"
+                "see images. If text read from them by OCR is included, use it and "
+                "say it may contain mistakes. Otherwise say so plainly, do not "
+                "guess or invent what they show, and ask the learner to type out "
+                "the question.]"
             )
             content = f"{message.text}\n\n{note}" if message.text else note
             message = replace(message, content=content, images=None)
@@ -429,7 +440,16 @@ def _record(
     )
 
 
-async def _search(query: str) -> tuple[list[str], str, bool]:
+async def _read_links(urls: list[str]) -> tuple[list[str], str, bool]:
+    """Like :func:`_search`, for pages the learner linked to."""
+    pages = await tutor_browse.read_pages(urls)
+    if not pages:
+        return [_notice("search_failed", _PAGE_FAILED)], _PAGE_UNREAD, False
+    shown = _sse("sources", {"items": tutor_search.sources(pages)})
+    return [shown], tutor_search.reference_block(pages), True
+
+
+async def _search(query: str, deep: bool = False) -> tuple[list[str], str, bool]:
     """Events to send, text for the instructions, and whether it holds web text."""
     try:
         if not query:
@@ -440,6 +460,13 @@ async def _search(query: str) -> tuple[list[str], str, bool]:
             )
         results = await tutor_search.search(query)
         problem = _SEARCH_EMPTY
+        if deep and results:
+            # Open the top results and use their text instead of the snippet.
+            top = [item["url"] for item in results[:_DEEP_PAGES]]
+            read = await asyncio.gather(*(tutor_browse.fetch_page(u) for u in top))
+            for item, page in zip(results, read):
+                if page:
+                    item["snippet"] = page["snippet"]
     except Exception as exc:  # noqa: BLE001 — the tutor answers without it
         logger.warning("Tutor web search failed: %s", type(exc).__name__)
         results, problem = [], _SEARCH_FAILED
@@ -500,7 +527,9 @@ async def _tutor_events(
     switch_reason: Optional[str] = (
         "The tutor works with Gemini and offline models only." if unsupported else None
     )
-    search_first = options.web_search == "always"
+    typed_now = options.typed[-1] if options.typed else ""
+    links = tutor_browse.find_urls(typed_now) if options.web_search != "off" else []
+    search_first = options.web_search in ("always", "deep") or bool(links)
     may_search = options.web_search == "auto"
     # Set once web text is in the instructions, or the model's search is used up.
     no_functions = False
@@ -531,7 +560,8 @@ async def _tutor_events(
                     notice = f"{switch_reason} {notice}"
                 if blind:
                     notice += (
-                        " It cannot see your attached image(s), so please type out "
+                        " It cannot see your attached image(s), only text read from "
+                        "them on this computer. If the answer looks wrong, type out "
                         "the question."
                     )
             announcement = [_notice(code, notice), _meta_event(candidate)]
@@ -546,11 +576,17 @@ async def _tutor_events(
 
         if search_first:
             search_first = False
-            typed = options.typed[-1] if options.typed else ""
-            typed_query = tutor_search.clean_query(typed)
-            if typed_query:
-                yield _sse("searching", {"query": typed_query})
-            lines, reference, found = await _search(typed_query)
+            if links:
+                hosts = ", ".join(link.split("/")[2] for link in links)
+                yield _sse("searching", {"query": f"Reading {hosts}"[:300]})
+                lines, reference, found = await _read_links(links)
+            else:
+                typed_query = tutor_search.clean_query(typed_now)
+                if typed_query:
+                    yield _sse("searching", {"query": typed_query})
+                lines, reference, found = await _search(
+                    typed_query, deep=options.web_search == "deep"
+                )
             for line in lines:
                 yield line
             messages = add_to_system(messages, reference)

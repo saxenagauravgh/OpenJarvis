@@ -52,7 +52,12 @@ export function buildPrintRoot(
 
 /** Open the print dialog for the given answers. False when there is nothing to print. */
 export async function saveAsPdf(title: string, answers: PrintableAnswer[]): Promise<boolean> {
-  if (!buildPrintRoot(document, title, answers)) return false;
+  const root = buildPrintRoot(document, title, answers);
+  if (!root) return false;
+  // Copied diagrams must be decoded before the page is captured.
+  await Promise.all(
+    Array.from(root.querySelectorAll('img'), (image) => image.decode().catch(() => {})),
+  );
   // The dialog suggests the page title as the file name.
   const previous = document.title;
   document.title = title.replace(/[\\/:*?"<>|]+/g, ' ').slice(0, 80).trim() || 'OpenJarvis';

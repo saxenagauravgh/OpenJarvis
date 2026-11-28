@@ -157,6 +157,8 @@ export interface TeamProgress {
 /** The Web and Expert team pills as they were when a question was sent. */
 export interface TutorChoices {
   web: boolean;
+  /** Also open the top search results and read them. */
+  deep?: boolean;
   team: boolean;
 }
 

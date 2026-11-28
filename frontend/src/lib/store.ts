@@ -115,6 +115,8 @@ interface Settings {
   webAlways: boolean;
   /** Have the expert team answer (the "Expert team" pill). */
   expertTeam: boolean;
+  /** The "Deep" pill: search the web and read the top pages. */
+  webDeep: boolean;
   voiceOutputEnabled: boolean;
   voiceAutoplay: boolean;
   // IANA time zone for dates in answers; '' = this device's zone.
@@ -138,6 +140,7 @@ function loadSettings(): Settings {
     webSearchEnabled: true,
     webAlways: false,
     expertTeam: false,
+    webDeep: false,
     voiceOutputEnabled: false,
     voiceAutoplay: false,
     timeZone: '',

@@ -316,7 +316,7 @@ function GenericConnectPanel({
 // Upload / Paste form
 // ---------------------------------------------------------------------------
 
-const ACCEPTED_EXTENSIONS = '.txt,.md,.pdf,.docx,.csv';
+const ACCEPTED_EXTENSIONS = '.txt,.md,.pdf,.docx,.csv,.png,.jpg,.jpeg,.webp';
 
 function UploadForm({ onDone }: { onDone?: () => void }) {
   const [tab, setTab] = useState<'paste' | 'upload'>('paste');
@@ -326,12 +326,14 @@ function UploadForm({ onDone }: { onDone?: () => void }) {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState('');
   const [error, setError] = useState('');
+  const [warning, setWarning] = useState('');
 
   const handlePaste = async () => {
     if (!content.trim()) return;
     setBusy(true);
     setError('');
     setResult('');
+    setWarning('');
     try {
       const res = await fetch(`${getBase()}/v1/connectors/upload/ingest`, {
         method: 'POST',
@@ -359,6 +361,7 @@ function UploadForm({ onDone }: { onDone?: () => void }) {
     setBusy(true);
     setError('');
     setResult('');
+    setWarning('');
     try {
       const formData = new FormData();
       for (const f of files) formData.append('files', f);
@@ -375,6 +378,7 @@ function UploadForm({ onDone }: { onDone?: () => void }) {
       }
       const data = await res.json();
       setResult(`Added ${data.chunks_added} chunk${data.chunks_added !== 1 ? 's' : ''} from ${files.length} file${files.length !== 1 ? 's' : ''}`);
+      setWarning(typeof data.warning === 'string' ? data.warning : '');
       setFiles([]);
       setTitle('');
       onDone?.();
@@ -464,6 +468,9 @@ function UploadForm({ onDone }: { onDone?: () => void }) {
             }}
             style={{ ...inputStyle, padding: 6 }}
           />
+          <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)', marginBottom: 6 }}>
+            Scanned pages and photos may be sent to Google to be read.
+          </div>
           {files.length > 0 && (
             <div style={{ fontSize: 11, color: 'var(--color-text-secondary)', marginBottom: 6 }}>
               {files.map((f) => f.name).join(', ')}
@@ -487,6 +494,11 @@ function UploadForm({ onDone }: { onDone?: () => void }) {
       {result && (
         <div style={{ fontSize: 12, color: 'var(--color-success)', marginTop: 8 }}>
           {result}
+        </div>
+      )}
+      {warning && (
+        <div role="alert" style={{ fontSize: 12, color: 'var(--color-warning)', marginTop: 8 }}>
+          {warning}
         </div>
       )}
       {error && (
@@ -1191,7 +1203,7 @@ function DataSourcesSection() {
                 {isExpanded && c.connector_id === 'upload' && (
                   <div style={{ borderTop: '1px solid var(--color-border)', padding: 12 }}>
                     <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', marginBottom: 10 }}>
-                      Paste text or upload files (.txt, .md, .pdf, .docx, .csv) to add them to your knowledge base.
+                      Paste text or upload files (.txt, .md, .pdf, .docx, .csv, .png, .jpg, .jpeg, .webp) to add them to your knowledge base.
                     </div>
                     <UploadForm onDone={loadConnectors} />
                   </div>

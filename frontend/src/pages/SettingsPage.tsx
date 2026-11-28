@@ -699,7 +699,7 @@ export function SettingsPage() {
           <Section title="Tools">
             <SettingRow
               label="Web search"
-              description="Let the tutor search the web. Searches send your question to the DuckDuckGo search engine."
+              description="Let the tutor search the web. Searches send your question to a free search engine (DuckDuckGo, or Yahoo)."
             >
               <button
                 type="button"

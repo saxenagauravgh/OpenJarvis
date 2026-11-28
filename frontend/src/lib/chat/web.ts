@@ -1,7 +1,7 @@
 /** Web search and expert team: what is asked for, and what comes back. */
 import type { TeamMember, TeamProgress, TutorChoices, WebSource } from '../../types';
 
-export type WebSearchMode = 'auto' | 'always' | 'off';
+export type WebSearchMode = 'auto' | 'always' | 'deep' | 'off';
 
 export interface WebSettings {
   /** The "Web search" switch in Settings. Off means nothing is ever searched. */
@@ -10,12 +10,15 @@ export interface WebSettings {
   webAlways: boolean;
   /** The "Expert team" pill. */
   expertTeam: boolean;
+  /** The "Deep" pill: search and read the top pages. */
+  webDeep?: boolean;
 }
 
 /** What the user is asking for with a new message. */
 export const tutorChoices = (settings: WebSettings, spoken = false): TutorChoices => ({
   web: !spoken && settings.webSearchEnabled && settings.webAlways,
   team: settings.expertTeam,
+  ...(!spoken && settings.webSearchEnabled && settings.webDeep ? { deep: true } : {}),
 });
 
 /** The request fields for those choices. The Settings switch always wins. */
@@ -23,7 +26,13 @@ export const requestOptions = (
   choices: TutorChoices,
   settings: WebSettings,
 ): { webSearch: WebSearchMode; team: boolean } => ({
-  webSearch: !settings.webSearchEnabled ? 'off' : choices.web ? 'always' : 'auto',
+  webSearch: !settings.webSearchEnabled
+    ? 'off'
+    : choices.deep
+      ? 'deep'
+      : choices.web
+        ? 'always'
+        : 'auto',
   team: choices.team,
 });
 

@@ -45,6 +45,13 @@ _UPLOAD_HEADER = (
     "looks garbled or does not answer the question."
 )
 
+# How answers may be drawn; the app renders each of these.
+PRESENTATION_GUIDE = (
+    (Path(__file__).resolve().parent / "knowledge" / "presentation.md")
+    .read_text(encoding="utf-8")
+    .strip()
+)
+
 _HEADER = (
     "## Reference notes for this question\n"
     "Use what is relevant and ignore the rest. Do not mention these notes. "

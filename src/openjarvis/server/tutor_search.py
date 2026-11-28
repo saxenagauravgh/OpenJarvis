@@ -1,4 +1,4 @@
-"""Free web search for the tutor: DuckDuckGo only, titles and snippets only.
+"""Free web search for the tutor: DuckDuckGo, then Yahoo; titles and snippets only.
 
 Only the search query leaves this computer, and no result page is ever fetched.
 Results are untrusted text, so they reach the model clearly delimited and
@@ -19,7 +19,8 @@ from urllib.parse import urlsplit
 logger = logging.getLogger("openjarvis.server.tutor")
 
 TOOL_NAME = "web_search"
-ENGINE = "duckduckgo"
+# Tried in order: the next is used when one finds nothing or fails.
+ENGINES_IN_ORDER = ("duckduckgo", "yahoo")
 MAX_RESULTS = 5
 MAX_QUERY_CHARS = 300
 MAX_TITLE_CHARS = 200
@@ -108,23 +109,31 @@ def _web_url(value: Any) -> str:
 
 
 def _run(query: str) -> list[dict[str, Any]]:
-    """The blocking DuckDuckGo request."""
+    """The blocking requests: DuckDuckGo first, then the fallback engine."""
     from ddgs import DDGS
     from ddgs.engines import ENGINES
 
-    # An unknown backend makes ddgs use every engine it has.
-    if ENGINE not in ENGINES["text"]:
-        raise SearchError("DuckDuckGo search is not available")
-    try:
-        return list(
-            DDGS(timeout=_REQUEST_TIMEOUT_SECONDS).text(
-                query, backend=ENGINE, max_results=MAX_RESULTS
+    # An unknown backend would make ddgs use every engine it has.
+    usable = [name for name in ENGINES_IN_ORDER if name in ENGINES["text"]]
+    if not usable:
+        raise SearchError("No web search engine is available")
+    failure: Exception | None = None
+    for engine in usable:
+        try:
+            found = list(
+                DDGS(timeout=_REQUEST_TIMEOUT_SECONDS).text(
+                    query, backend=engine, max_results=MAX_RESULTS
+                )
             )
-        )
-    except Exception as exc:
-        if str(exc) == "No results found.":
-            return []
-        raise
+        except Exception as exc:
+            if str(exc) != "No results found.":
+                failure = exc
+            continue
+        if found:
+            return found
+    if failure is not None:
+        raise failure
+    return []
 
 
 async def search(query: str) -> list[dict[str, str]]:
