@@ -270,11 +270,11 @@ def test_length_finish_reason_and_server_defaults(client, gemini, ollama):
     config = gemini.calls[0]["config"]
     assert config.max_output_tokens == 8192
     assert config.temperature == pytest.approx(0.3)
-    # No agent tools: only the proposal of an app settings change.
+    # No agent tools: only a settings proposal and a web search request.
     declared = [
         d["name"] for tool in config.tools for d in tool["function_declarations"]
     ]
-    assert declared == ["change_app_setting"]
+    assert declared == ["change_app_setting", "web_search"]
 
 
 def test_settings_request_becomes_a_proposal_to_confirm(client, gemini, ollama):

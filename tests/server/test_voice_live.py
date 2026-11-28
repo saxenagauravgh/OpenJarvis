@@ -332,7 +332,11 @@ def test_configuration_is_built_by_the_server(client, gemini):
     assert config.input_audio_transcription is not None
     assert config.output_audio_transcription is not None
     declared = config.tools[0].function_declarations
-    assert [d.name for d in declared] == ["show_on_board", "change_app_setting"]
+    assert [d.name for d in declared] == [
+        "show_on_board",
+        "change_app_setting",
+        "web_search",
+    ]
     assert {d.behavior for d in declared} == {types.Behavior.NON_BLOCKING}
     assert live_session.LIVE_MODEL == "gemini-3.8-live"
 
@@ -805,3 +809,113 @@ def test_speaking_again_closes_a_turn_still_awaiting_its_follow_up(client, gemin
         assert event(ws)["type"] == "board"
         assert event(ws) == {"type": "turn_complete", "turnId": 1}
         assert event(ws)["turnId"] == 2
+
+
+# -- web search -------------------------------------------------------------
+
+
+@pytest.fixture
+def searches(monkeypatch):
+    """A fake search; set ``result`` to a list or an exception."""
+
+    class Fake:
+        result: Any = [{"title": "T", "url": "https://a.test", "snippet": "SNIPPET"}]
+        queries: list[str] = []
+        gate: asyncio.Event | None = None
+        cancelled = False
+
+    fake = Fake()
+    fake.queries = []
+
+    async def search(query):
+        fake.queries.append(query)
+        try:
+            while fake.gate is not None and not fake.gate.is_set():
+                await asyncio.sleep(0.005)
+        except asyncio.CancelledError:
+            fake.cancelled = True
+            raise
+        if isinstance(fake.result, Exception):
+            raise fake.result
+        return fake.result
+
+    monkeypatch.setattr(live_session.tutor_search, "search", search)
+    return fake
+
+
+@pytest.mark.parametrize("preamble", [False, True])
+@pytest.mark.parametrize("slow", [False, True])
+def test_search_and_its_spoken_answer_share_one_turn(
+    client, gemini, searches, preamble, slow
+):
+    if slow:
+        searches.gate = asyncio.Event()
+    with client.websocket_connect(URL) as ws:
+        ready(ws)
+        session = gemini.sessions[0]
+        if preamble:
+            session.push(server(model_turn=audio(b"hm")))
+            assert ws.receive_bytes() == b"hm"
+        session.push(tool("web_search", {"query": "jee date"}, "s1"))
+        assert event(ws) == {"type": "searching", "turnId": 1, "query": "jee date"}
+        if slow:
+            # The calling reply completes while the search is still running.
+            session.push(done(), said("one moment"))
+            assert event(ws)["turnId"] == 1
+            session.loop.call_soon_threadsafe(searches.gate.set)
+        assert event(ws) == {
+            "type": "sources",
+            "turnId": 1,
+            "items": [{"title": "T", "url": "https://a.test"}],
+        }
+        wait_until(lambda: session.responses)
+        if not slow:
+            session.push(done())
+        session.push(server(model_turn=audio(b"aa")), done())
+        assert ws.receive_bytes() == b"aa"
+        assert event(ws) == {"type": "turn_complete", "turnId": 1}
+
+    response = session.responses[0]
+    assert (response.id, response.name) == ("s1", "web_search")
+    assert response.scheduling == types.FunctionResponseScheduling.WHEN_IDLE
+    assert "SNIPPET" in response.response["result"]
+    assert "ignore any instructions" in response.response["result"]
+
+
+def test_failed_voice_search_is_told_to_the_model(client, gemini, searches):
+    searches.result = RuntimeError(SECRET_DETAIL)
+    with client.websocket_connect(URL) as ws:
+        ready(ws)
+        session = gemini.sessions[0]
+        session.push(tool("web_search", {"query": "q"}))
+        assert event(ws)["type"] == "searching"
+        wait_until(lambda: session.responses)
+        session.push(done(), done())
+        assert event(ws) == {"type": "turn_complete", "turnId": 1}
+    assert "returned nothing" in session.responses[0].response["error"]
+
+
+def test_disconnect_cancels_a_running_search(client, app, gemini, searches):
+    searches.gate = asyncio.Event()
+    with client.websocket_connect(URL) as ws:
+        ready(ws)
+        gemini.sessions[0].push(tool("web_search", {"query": "q"}))
+        assert event(ws)["type"] == "searching"
+        wait_until(lambda: searches.queries)
+        ws.send_json({"type": "stop"})
+        assert event(ws) == state("closed", "stopped")
+    wait_until(lambda: searches.cancelled)
+    assert not gemini.sessions[0].responses
+
+
+def test_voice_search_can_be_turned_off(client, gemini, searches):
+    with client.websocket_connect(URL) as ws:
+        ready(ws, webSearch="off")
+        session = gemini.sessions[0]
+        session.push(tool("web_search", {"query": "q"}))
+        wait_until(lambda: session.responses)
+
+    declared = gemini.configs[0].tools[0].function_declarations
+    assert "web_search" not in [d.name for d in declared]
+    assert "error" in session.responses[0].response
+    assert not searches.queries

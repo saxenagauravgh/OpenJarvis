@@ -25,6 +25,8 @@ const request = {
   model: 'gemini-2.5-flash',
   messages: [{ role: 'user' as const, content: 'hi' }],
   adultConfirmed: true,
+  webSearch: 'auto' as const,
+  team: false,
 };
 
 const frame = (event: string, data: unknown) =>
@@ -213,5 +215,48 @@ describe('streamResearch', () => {
       { type: 'synthesis', text: 'a' },
       { type: 'done' },
     ]);
+  });
+});
+
+describe('web search and expert team events', () => {
+  it('reads searching, sources and team progress', async () => {
+    serve([
+      frame('searching', { query: 'g on the Moon' }),
+      frame('sources', {
+        items: [
+          { title: 'NASA', url: 'https://nasa.gov/moon' },
+          { title: 'Bad', url: 'javascript:alert(1)' },
+        ],
+      }),
+      frame('team', { member: 'physics', label: 'Physics expert', status: 'working' }),
+      done,
+    ]);
+
+    expect((await run()).slice(0, 3)).toEqual([
+      { type: 'searching', query: 'g on the Moon' },
+      { type: 'sources', items: [{ title: 'NASA', url: 'https://nasa.gov/moon' }] },
+      { type: 'team', member: 'physics', label: 'Physics expert', status: 'working' },
+    ]);
+  });
+
+  it('ignores events it cannot use', async () => {
+    serve([
+      frame('searching', { query: '' }),
+      frame('sources', { items: [{ title: 'x', url: 'file:///etc/passwd' }] }),
+      frame('sources', { items: 'none' }),
+      frame('team', { member: 'biology', label: 'x', status: 'working' }),
+      frame('team', { member: 'maths', label: 'x', status: 'asleep' }),
+      done,
+    ]);
+
+    expect((await run()).map((event) => event.type)).toEqual(['done']);
+  });
+
+  it('sends the web search and team choices', async () => {
+    serve([done]);
+    await collect(streamTutorChat({ ...request, webSearch: 'always', team: true }));
+
+    const [, init] = vi.mocked(fetch).mock.calls[0];
+    expect(JSON.parse(init!.body as string)).toMatchObject({ webSearch: 'always', team: true });
   });
 });

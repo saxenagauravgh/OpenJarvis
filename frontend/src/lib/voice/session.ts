@@ -69,7 +69,7 @@ const workletUrl = (name: string) =>
  * browser only lets audio start during a user gesture.
  */
 export function startLiveSession(
-  options: { history: LiveHistoryTurn[]; adultConfirmed: boolean },
+  options: { history: LiveHistoryTurn[]; adultConfirmed: boolean; webSearch: 'auto' | 'off' },
   callbacks: LiveSessionCallbacks,
 ): LiveSession {
   let ended = false;
@@ -214,7 +214,8 @@ export function startLiveSession(
     const ws = new WebSocket(liveVoiceUrl(), buildWsProtocols());
     socket = ws;
     ws.binaryType = 'arraybuffer';
-    ws.onopen = () => ws.send(startMessage(options.history, options.adultConfirmed));
+    ws.onopen = () =>
+      ws.send(startMessage(options.history, options.adultConfirmed, options.webSearch));
     ws.onmessage = (event) => {
       if (typeof event.data !== 'string') {
         onAudio(event.data as ArrayBuffer);

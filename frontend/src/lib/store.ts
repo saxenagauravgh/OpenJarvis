@@ -109,6 +109,12 @@ interface Settings {
   speechEnabled: boolean;
   /** What the Talk button uses: Google's live voice, or the Mac's own. */
   talkVoice: 'live' | 'standard';
+  /** Allow the tutor to search the web at all. */
+  webSearchEnabled: boolean;
+  /** Search for every typed message (the "Web" pill). */
+  webAlways: boolean;
+  /** Have the expert team answer (the "Expert team" pill). */
+  expertTeam: boolean;
   voiceOutputEnabled: boolean;
   voiceAutoplay: boolean;
   // IANA time zone for dates in answers; '' = this device's zone.
@@ -129,6 +135,9 @@ function loadSettings(): Settings {
     maxTokens: 4096,
     speechEnabled: false,
     talkVoice: 'live',
+    webSearchEnabled: true,
+    webAlways: false,
+    expertTeam: false,
     voiceOutputEnabled: false,
     voiceAutoplay: false,
     timeZone: '',
@@ -322,6 +331,22 @@ export const useAppStore = create<AppState>((set, get) => {
   };
 
   const initial = loadConversations();
+  // A search still marked as running was cut short when the app last closed.
+  let interrupted = false;
+  for (const conversation of Object.values(initial.conversations)) {
+    for (const message of conversation.messages ?? []) {
+      if (message.searching === undefined) continue;
+      delete message.searching;
+      interrupted = true;
+    }
+  }
+  if (interrupted) {
+    try {
+      saveConversations(initial);
+    } catch {
+      // Storage unavailable: it is cleared in memory only.
+    }
+  }
   const convList = Object.values(initial.conversations).sort(
     (a, b) => b.updatedAt - a.updatedAt,
   );

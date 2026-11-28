@@ -226,8 +226,43 @@ describe('a live session', () => {
     expect(socket().url).toBe('ws://localhost:8000/v1/voice/live');
     socket().open();
     expect(socket().sent).toEqual([
-      { type: 'start', v: 1, adultConfirmed: true, history: [{ role: 'user', text: 'Earlier' }] },
+      {
+        type: 'start',
+        v: 1,
+        adultConfirmed: true,
+        history: [{ role: 'user', text: 'Earlier' }],
+        webSearch: 'auto',
+      },
     ]);
+  });
+
+  it('asks for no web search when it is switched off', async () => {
+    const { useAppStore } = await import('../store');
+    useAppStore.getState().updateSettings({ webSearchEnabled: false });
+    const { socket } = await begin();
+    socket().open();
+    expect(socket().sent[0].webSearch).toBe('off');
+  });
+
+  it('saves a search and its sources on the answer', async () => {
+    const { socket, store } = await begin();
+    socket().ready();
+    socket().receive({ type: 'searching', turnId: 1, query: 'moon gravity' });
+    expect(store.getState().messages[0]).toMatchObject({
+      role: 'assistant',
+      searching: 'moon gravity',
+    });
+    const items = [{ title: 'NASA', url: 'https://nasa.gov/moon' }];
+    socket().receive({ type: 'sources', turnId: 1, items });
+    socket().receive({ type: 'transcript', turnId: 1, role: 'assistant', delta: '1.62.' });
+    socket().receive({ type: 'turn_complete', turnId: 1 });
+    const [reply] = store.getState().messages;
+    expect(reply).toMatchObject({
+      content: '1.62.',
+      webSearches: ['moon gravity'],
+      webSources: items,
+    });
+    expect(reply.searching).toBeUndefined();
   });
 
   it('sends microphone audio once ready, dropping it when backed up', async () => {

@@ -112,6 +112,57 @@ describe('reduceTurns', () => {
     ]);
   });
 
+  const searching = (turnId: string, query: string): TurnEvent => ({
+    type: 'searching',
+    turnId,
+    query,
+  });
+  const source = { title: 'NASA', url: 'https://nasa.gov/moon' };
+  const found = (turnId: string, items = [source]): TurnEvent => ({
+    type: 'sources',
+    turnId,
+    items,
+  });
+
+  it('shows a search on the answer, below the question', () => {
+    const chat = run([searching('1', 'moon'), heard('1', 'How strong?')]);
+    expect(chat.map((m) => m.role)).toEqual(['user', 'assistant']);
+    expect(chat[1]).toMatchObject({ searching: 'moon', webSearches: ['moon'], live: true });
+  });
+
+  it('takes the search down and keeps its sources', () => {
+    const [reply] = run([
+      searching('1', 'moon'),
+      found('1'),
+      searching('1', 'mars'),
+      said('1', '1.62'),
+      found('1', [source, { title: 'ESA', url: 'https://esa.int/' }]),
+      done('1'),
+    ]);
+    expect(reply.searching).toBeUndefined();
+    expect(reply.content).toBe('1.62');
+    expect(reply.webSearches).toEqual(['moon', 'mars']);
+    expect(reply.webSources?.map((s) => s.title)).toEqual(['NASA', 'ESA']);
+  });
+
+  it.each([
+    ['sources with no links', found('1', [])],
+    ['the answer', said('1', 'A')],
+    ['an interruption', cut('1')],
+    ['the end of the turn', done('1')],
+    ['the end of the session', { type: 'ended' } as TurnEvent],
+  ])('stops showing a search after %s', (_name, event) => {
+    const [reply] = run([searching('1', 'moon'), event]);
+    expect(reply.searching).toBeUndefined();
+    expect(reply.webSearches).toEqual(['moon']);
+  });
+
+  it('does not show a search on an interrupted reply', () => {
+    const [reply] = run([said('1', 'Well'), cut('1'), searching('1', 'moon')]);
+    expect(reply.searching).toBeUndefined();
+    expect(reply.stopped).toBe(true);
+  });
+
   it('creates no empty messages', () => {
     expect(run([heard('1', ' '), said('1', ''), said('1', ' '), cut('1'), done('1')])).toEqual([]);
   });

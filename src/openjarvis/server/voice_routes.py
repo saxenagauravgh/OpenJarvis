@@ -1,7 +1,8 @@
 """``WebSocket /v1/voice/live``: a spoken conversation with the tutor.
 
 Client to server: first a JSON text frame ``{"type": "start", "v": 1,
-"adultConfirmed": true, "history": [{"role": "user"|"assistant", "text"}]}``,
+"adultConfirmed": true, "history": [{"role": "user"|"assistant", "text"}],
+"webSearch"?: "off"}``,
 then binary frames of 16 kHz mono PCM16LE, ``{"type": "text", "text"}`` and
 ``{"type": "stop"}``.
 
@@ -12,6 +13,8 @@ Server to client: binary frames of 24 kHz mono PCM16LE and these JSON events:
 ``transcript``     ``{"turnId", "role", "delta"}``
 ``board``          ``{"turnId", "title", "markdown"}``
 ``action``         ``{"turnId", "setting", "value"}`` (a proposal to confirm)
+``searching``      ``{"turnId", "query"}``
+``sources``        ``{"turnId", "items": [{"title", "url"}]}``
 ``interrupted``    ``{"turnId"}``
 ``turn_complete``  ``{"turnId"}``
 ``error``          ``{"code", "message", "retryable"}``
@@ -145,6 +148,7 @@ async def live_voice(websocket: WebSocket) -> None:
             getattr(state, "live_connect", None) or live_session.gemini_connect,
             persona=persona,
             history=_history(start.get("history")),
+            web_search=start.get("webSearch") != "off",
         )
     except Exception as exc:
         google_common.log_failure(logger, "Could not start a voice session", exc)

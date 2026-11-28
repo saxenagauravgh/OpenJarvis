@@ -3,6 +3,7 @@
  * said into it, and decides what happens when the session ends.
  */
 import { generateId, useAppStore } from '../store';
+import { liveWebSearch } from '../chat/web';
 import { liveHistory } from './protocol';
 import { startLiveSession, type LiveEnd, type LiveStatus } from './session';
 import { initialTurns, reduceTurns, type TurnEvent } from './turns';
@@ -81,7 +82,7 @@ export function startLiveTalk(handlers: LiveTalkHandlers): LiveTalk {
     app.conversations.find((c) => c.id === conversationId)?.messages ?? [],
   );
   const session = startLiveSession(
-    { history, adultConfirmed: app.adultConfirmed },
+    { history, adultConfirmed: app.adultConfirmed, webSearch: liveWebSearch(app.settings) },
     {
       onStatus: handlers.onStatus,
       onMessage: (message) => {

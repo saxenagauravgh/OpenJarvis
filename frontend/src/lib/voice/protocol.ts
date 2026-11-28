@@ -1,7 +1,8 @@
 /** The wire format of the live voice socket, /v1/voice/live. */
 import { getBase } from '../api';
 import { buildTutorHistory } from '../chat/history';
-import type { ChatMessage } from '../../types';
+import { safeSources } from '../chat/web';
+import type { ChatMessage, WebSource } from '../../types';
 
 export type LiveRole = 'user' | 'assistant';
 
@@ -22,6 +23,8 @@ export type ServerMessage =
   | { type: 'transcript'; turnId: string; role: LiveRole; delta: string }
   | { type: 'board'; turnId: string; title: string; markdown: string }
   | { type: 'action'; turnId: string; setting: string; value: string }
+  | { type: 'searching'; turnId: string; query: string }
+  | { type: 'sources'; turnId: string; items: WebSource[] }
   | { type: 'interrupted'; turnId: string }
   | { type: 'turn_complete'; turnId: string }
   | { type: 'error'; code: string; message: string; retryable: boolean };
@@ -75,6 +78,14 @@ export function parseServerMessage(raw: unknown): ServerMessage | null {
     if (markdown === null) return null;
     return { type: 'board', turnId, title: text(data.title) ?? '', markdown };
   }
+  if (data.type === 'searching') {
+    const query = text(data.query);
+    return query ? { type: 'searching', turnId, query } : null;
+  }
+  if (data.type === 'sources') {
+    if (!Array.isArray(data.items)) return null;
+    return { type: 'sources', turnId, items: safeSources(data.items) };
+  }
   if (data.type === 'action') {
     const setting = text(data.setting);
     const value = typeof data.value === 'number' ? String(data.value) : text(data.value);
@@ -84,8 +95,11 @@ export function parseServerMessage(raw: unknown): ServerMessage | null {
   return null;
 }
 
-export const startMessage = (history: LiveHistoryTurn[], adultConfirmed: boolean) =>
-  JSON.stringify({ type: 'start', v: 1, adultConfirmed, history });
+export const startMessage = (
+  history: LiveHistoryTurn[],
+  adultConfirmed: boolean,
+  webSearch: 'auto' | 'off',
+) => JSON.stringify({ type: 'start', v: 1, adultConfirmed, history, webSearch });
 
 export const textMessage = (value: string) => JSON.stringify({ type: 'text', text: value });
 

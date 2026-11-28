@@ -697,7 +697,26 @@ export function SettingsPage() {
 
           {/* Tools */}
           <Section title="Tools">
-            <SettingRow label="Web Search" description="Tavily key for web search tool">
+            <SettingRow
+              label="Web search"
+              description="Let the tutor search the web. Searches send your question to the DuckDuckGo search engine."
+            >
+              <button
+                type="button"
+                role="switch"
+                aria-label="Web search"
+                aria-checked={settings.webSearchEnabled}
+                onClick={() => { updateSettings({ webSearchEnabled: !settings.webSearchEnabled }); showSaved(); }}
+                className="px-3 py-1.5 rounded-md text-xs font-medium cursor-pointer"
+                style={{
+                  background: settings.webSearchEnabled ? 'var(--color-accent)' : 'var(--color-bg-secondary)',
+                  color: settings.webSearchEnabled ? 'var(--color-on-accent)' : 'var(--color-text-secondary)',
+                }}
+              >
+                {settings.webSearchEnabled ? 'On' : 'Off'}
+              </button>
+            </SettingRow>
+            <SettingRow label="Tavily API key" description="Tavily key for web search tool">
               <ApiKeyInput keyName="TAVILY_API_KEY" placeholder="tvly-..." toolName="web_search" />
             </SettingRow>
           </Section>

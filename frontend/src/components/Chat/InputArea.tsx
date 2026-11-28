@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { Send, Square, Paperclip, Search, AudioLines } from 'lucide-react';
+import { WebPills } from './WebPills';
 import { toast } from 'sonner';
 import { useAppStore, generateId } from '../../lib/store';
 import { streamResearch } from '../../lib/sse';
@@ -278,6 +279,7 @@ export function InputArea() {
         model: selectedModel,
         content,
         files,
+        spoken: spokenText !== undefined,
       });
     }
     const content = typed;
@@ -782,7 +784,7 @@ export function InputArea() {
   return (
     <div className="px-4 pb-4 pt-2" style={{ maxWidth: 'var(--chat-max-width)', margin: '0 auto', width: '100%' }}>
       <div className="mb-2 flex flex-col gap-1">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {developerMode && (
           <button
             type="button"
@@ -816,6 +818,7 @@ export function InputArea() {
             <AudioLines size={12} className={talking ? 'animate-pulse' : undefined} />
             {conversationLabel}
           </button>
+          <WebPills />
           {/* A small orb at the end of this row, while voice is in use. */}
           {(talking || ttsState !== 'idle') && (
             <button

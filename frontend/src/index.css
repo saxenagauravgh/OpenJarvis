@@ -1012,3 +1012,35 @@
 .voice-orb-bars g:nth-child(2n) rect { --bar-reach: 0.7; }
 .voice-orb-bars g:nth-child(3n) rect { --bar-reach: 1.7; }
 .voice-orb-bars g:nth-child(5n) rect { --bar-reach: 1; }
+
+/* ───────────── Save as PDF: only the prepared answers are printed ───────────── */
+#print-root { display: none; }
+
+@media print {
+  html, body {
+    height: auto !important;
+    overflow: visible !important;
+    background: #fff !important;
+  }
+  body > *:not(#print-root) { display: none !important; }
+  body::after { display: none !important; }
+  #print-root {
+    display: block;
+    font-size: 11.5pt;
+    line-height: 1.55;
+    padding: 0 4mm;
+  }
+  #print-root, #print-root * {
+    color: #111 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    text-shadow: none !important;
+  }
+  #print-root h1 { font-size: 16pt; margin: 0 0 5mm; border-bottom: 1px solid #999; padding-bottom: 2mm; }
+  #print-root .print-question { font-weight: 600; margin: 6mm 0 2mm; }
+  #print-root pre, #print-root table, #print-root .katex-display { break-inside: avoid; }
+  #print-root pre { border: 1px solid #ccc; padding: 2mm; white-space: pre-wrap; }
+  #print-root table { border-collapse: collapse; }
+  #print-root th, #print-root td { border: 1px solid #999; padding: 1mm 2mm; }
+  @page { margin: 16mm; }
+}

@@ -2,6 +2,7 @@ import { useAppStore, generateId } from '../store';
 import { streamTutorChat } from '../sse';
 import { fetchSavings } from '../api';
 import { buildTutorHistory } from './history';
+import { addQuery, mergeSources, requestOptions, tutorChoices, updateTeam } from './web';
 import { parseAction } from '../setting-actions';
 import type {
   ChatAttachment,
@@ -9,7 +10,10 @@ import type {
   FinishReason,
   MessageError,
   MessageNotice,
+  TeamProgress,
   TokenUsage,
+  TutorChoices,
+  WebSource,
 } from '../../types';
 
 export const CONTINUE_PROMPT = 'Continue exactly where you stopped.';
@@ -21,6 +25,10 @@ export interface SendTutorOptions {
   content: string;
   /** Uploaded files to send with the message. */
   files?: ChatAttachment[];
+  /** The question was spoken: the Web pill, which is for typing, is ignored. */
+  spoken?: boolean;
+  /** Ask the way an earlier question did, instead of as the pills are now. */
+  choices?: TutorChoices;
 }
 
 export type RetryResult =
@@ -52,6 +60,8 @@ export async function sendTutorMessage({
   model,
   content,
   files = [],
+  spoken,
+  choices,
 }: SendTutorOptions): Promise<ChatMessage | null> {
   const store = useAppStore.getState();
   if (!content || !model || store.streamState.isStreaming) return null;
@@ -65,6 +75,7 @@ export async function sendTutorMessage({
     files: files.length
       ? files.map(({ id, name, mime, size, kind }) => ({ id, name, mime, size, kind }))
       : undefined,
+    choices: choices ?? tutorChoices(useAppStore.getState().settings, spoken),
   };
   store.addMessage(convId, question);
 
@@ -103,7 +114,14 @@ export function continueTutorMessage(
   conversationId: string,
   model: string,
 ): Promise<ChatMessage | null> {
-  return sendTutorMessage({ conversationId, model, content: CONTINUE_PROMPT });
+  // A continuation only carries on: searching for the words "continue" or
+  // running the expert team again would start over.
+  return sendTutorMessage({
+    conversationId,
+    model,
+    content: CONTINUE_PROMPT,
+    choices: { web: false, team: false },
+  });
 }
 
 async function streamReply(
@@ -158,10 +176,16 @@ async function streamReply(
   let ttftMs: number | undefined;
   let lastFlush = 0;
   const notices: MessageNotice[] = [];
+  let searching: string | undefined;
+  let webSearches: string[] = [];
+  let webSources: WebSource[] = [];
+  let team: TeamProgress[] = [];
+  const { settings, adultConfirmed } = useAppStore.getState();
+  const options = requestOptions(question.choices ?? tutorChoices(settings), settings);
 
   try {
     for await (const event of streamTutorChat(
-      { model, messages: history, adultConfirmed: useAppStore.getState().adultConfirmed },
+      { model, messages: history, adultConfirmed, ...options },
       controller.signal,
     )) {
       if (controller.signal.aborted) break;
@@ -174,10 +198,24 @@ async function streamReply(
         content += event.text;
         store.setStreamState({ content, phase: '' });
         const now = Date.now();
-        if (now - lastFlush >= 80) {
-          store.patchMessage(convId, reply.id, { content });
+        // Text arriving means any search is over.
+        if (searching || now - lastFlush >= 80) {
+          searching = undefined;
+          store.patchMessage(convId, reply.id, { content, searching });
           lastFlush = now;
         }
+      } else if (event.type === 'searching') {
+        searching = event.query;
+        webSearches = addQuery(webSearches, event.query);
+        store.patchMessage(convId, reply.id, { content, searching, webSearches });
+      } else if (event.type === 'sources') {
+        searching = undefined;
+        webSources = mergeSources(webSources, event.items);
+        store.patchMessage(convId, reply.id, { content, searching, webSources });
+      } else if (event.type === 'team') {
+        const { type: _type, ...progress } = event;
+        team = updateTeam(team, progress);
+        store.patchMessage(convId, reply.id, { content, team });
       } else if (event.type === 'notice') {
         notices.push({ code: event.code, message: event.message });
         store.patchMessage(convId, reply.id, { content, notices: [...notices] });
@@ -219,6 +257,10 @@ async function streamReply(
     error,
     stopped: stopped || undefined,
     notices: notices.length ? notices : undefined,
+    searching: undefined,
+    webSearches: webSearches.length ? webSearches : undefined,
+    webSources: webSources.length ? webSources : undefined,
+    team: team.length ? team : undefined,
     telemetry: {
       engine: provider,
       model_id: answeredBy,

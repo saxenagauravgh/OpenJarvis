@@ -5,7 +5,9 @@ import rehypeKatex from 'rehype-katex';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import 'katex/dist/katex.min.css';
-import { Copy, Check, FileText, Image as ImageIcon } from 'lucide-react';
+import { Copy, Check, FileDown, FileText, Image as ImageIcon } from 'lucide-react';
+import { toast } from 'sonner';
+import { saveAsPdf } from '../../lib/export-pdf';
 import { AudioPlayer } from './AudioPlayer';
 import { ToolCallCard } from './ToolCallCard';
 import { ResearchTimeline } from './ResearchTimeline';
@@ -14,6 +16,7 @@ import { XRayFooter } from './XRayFooter';
 import { SpeakMessageButton } from './SpeakMessageButton';
 import { MessageError, MessageNotices, MessageOutcome } from './MessageStatus';
 import { SettingActionCard } from './SettingActionCard';
+import { SearchStatus, SourceList, TeamStatus } from './WebProgress';
 import type { ChatMessage } from '../../types';
 import { useAppStore } from '../../lib/store';
 import { normalizeMathDelimiters, stripThinkTags } from '../../lib/message-text';
@@ -93,6 +96,30 @@ function CodeBlockPre({ children, ...props }: any) {
         {children}
       </pre>
     </div>
+  );
+}
+
+function SavePdfButton({ messageId }: { messageId: string }) {
+  const save = () => {
+    const messages = useAppStore.getState().messages;
+    const index = messages.findIndex((m) => m.id === messageId);
+    const asked = messages[index - 1];
+    const question = asked?.role === 'user' ? asked.content : undefined;
+    void saveAsPdf(question?.slice(0, 60) || 'Tutor notes', [{ messageId, question }]).catch(() =>
+      toast.error('Could not open the print dialog.'),
+    );
+  };
+  return (
+    <button
+      type="button"
+      onClick={save}
+      className="p-1.5 rounded-md transition-colors cursor-pointer"
+      style={{ color: 'var(--color-text-tertiary)' }}
+      title="Save as PDF (in the dialog choose PDF, then Save as PDF)"
+      aria-label="Save answer as PDF"
+    >
+      <FileDown size={14} />
+    </button>
   );
 }
 
@@ -212,10 +239,12 @@ export function MessageBubble({ message, isLive = false, onRetry, onContinue }: 
       {message.audio?.url && <AudioPlayer src={message.audio.url} />}
 
       <MessageNotices notices={message.notices} />
+      <TeamStatus team={message.team} isLive={isLive} />
+      <SearchStatus message={message} isLive={isLive} />
 
       {/* Assistant message */}
       {cleanContent && (
-        <div className="prose max-w-none">
+        <div className="prose max-w-none" data-answer-content>
           <ReactMarkdown
             remarkPlugins={[remarkGfm, remarkMath]}
             rehypePlugins={rehypePlugins}
@@ -228,6 +257,8 @@ export function MessageBubble({ message, isLive = false, onRetry, onContinue }: 
           </ReactMarkdown>
         </div>
       )}
+
+      <SourceList sources={message.webSources} />
 
       {message.action && <SettingActionCard message={message} />}
       {message.error && (
@@ -242,6 +273,7 @@ export function MessageBubble({ message, isLive = false, onRetry, onContinue }: 
       {cleanContent && (
         <div className="flex items-center gap-2 mt-1.5">
           <CopyMessageButton content={cleanContent} />
+          {!isLive && <SavePdfButton messageId={message.id} />}
           {!isLive && (
             <SpeakMessageButton messageId={message.id} content={cleanContent} />
           )}

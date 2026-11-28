@@ -1,5 +1,13 @@
-import type { FinishReason, ResearchEvent, SSEEvent, TokenUsage } from '../types';
+import type {
+  FinishReason,
+  ResearchEvent,
+  SSEEvent,
+  TeamProgress,
+  TokenUsage,
+  WebSource,
+} from '../types';
 import { getBase, authHeaders } from './api';
+import { safeSources, TEAM_MEMBERS, type WebSearchMode } from './chat/web';
 import { timeZoneHeaders } from './timezone';
 
 /**
@@ -74,12 +82,18 @@ export interface TutorChatRequest {
   model: string;
   messages: TutorMessage[];
   adultConfirmed: boolean;
+  webSearch: WebSearchMode;
+  /** Have the expert team work on the reply. */
+  team: boolean;
 }
 
 export type TutorEvent =
   | { type: 'meta'; model: string; provider: 'gemini' | 'local' }
   | { type: 'delta'; text: string }
   | { type: 'notice'; code: string; message: string }
+  | { type: 'searching'; query: string }
+  | { type: 'sources'; items: WebSource[] }
+  | ({ type: 'team' } & TeamProgress)
   /** A settings change the tutor proposes; the user decides. */
   | { type: 'action'; setting: string; value: string }
   | { type: 'done'; finishReason: FinishReason; usage?: TokenUsage }
@@ -142,6 +156,20 @@ function parseTutorEvent({ event, data }: SSEEvent): TutorEvent | undefined {
       return { type: 'delta', text: text(payload.text) };
     case 'notice':
       return { type: 'notice', code: text(payload.code), message: text(payload.message) };
+    case 'searching':
+      return text(payload.query)
+        ? { type: 'searching', query: text(payload.query) }
+        : undefined;
+    case 'sources': {
+      const items = safeSources(payload.items);
+      return items.length ? { type: 'sources', items } : undefined;
+    }
+    case 'team': {
+      const member = TEAM_MEMBERS.find((m) => m === payload.member);
+      const status = (['working', 'done', 'failed'] as const).find((s) => s === payload.status);
+      if (!member || !status) return undefined;
+      return { type: 'team', member, label: text(payload.label) || member, status };
+    }
     case 'action':
       return { type: 'action', setting: text(payload.setting), value: text(payload.value) };
     case 'done':
