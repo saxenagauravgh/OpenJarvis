@@ -20,3 +20,13 @@ export function isEmbedOnlyModel(modelId: string): boolean {
     EMBEDDING_MODEL_PREFIXES.some((prefix) => leaf.startsWith(prefix))
   );
 }
+
+/**
+ * Cloud models are picked in the model picker's Cloud tab and do not appear in
+ * the server's model list, so "not in the list" must not mean "missing".
+ */
+export function isCloudModel(modelId: string): boolean {
+  return /^(gemini-|gpt-(?!oss)|o[134]-|claude-|openrouter\/|atlascloud\/|MiniMax-)/.test(
+    modelId || '',
+  );
+}

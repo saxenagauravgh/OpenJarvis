@@ -106,7 +106,8 @@ export function SetupScreen({ onReady }: { onReady: () => void }) {
         const recommended = rec.model && chatModels.some((m) => m.id === rec.model)
           ? rec.model
           : chatModels[0]?.id || '';
-        if (recommended && !hadSelection) {
+        // A default model the user saved wins over the hardware recommendation.
+        if (recommended && !hadSelection && !store.settings.defaultModel) {
           store.setSelectedModel(recommended);
         }
       } catch {

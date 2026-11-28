@@ -15,7 +15,7 @@ import type {
   TokenUsage,
 } from '../types';
 import type { ManagedAgent } from './api';
-import { isEmbedOnlyModel } from './model-capabilities';
+import { isCloudModel, isEmbedOnlyModel } from './model-capabilities';
 import { serializeToolCallArguments } from './tool-call';
 
 export interface CachedConnector {
@@ -501,7 +501,8 @@ export const useAppStore = create<AppState>((set, get) => {
         const chatModels = models.filter((m) => !isEmbedOnlyModel(m.id));
         const preferred =
           (state.settings.defaultModel &&
-            chatModels.some((m) => m.id === state.settings.defaultModel) &&
+            (isCloudModel(state.settings.defaultModel) ||
+              chatModels.some((m) => m.id === state.settings.defaultModel)) &&
             state.settings.defaultModel) ||
           chatModels[0]?.id ||
           models.find((m) => !isEmbedOnlyModel(m.id))?.id ||
@@ -511,6 +512,7 @@ export const useAppStore = create<AppState>((set, get) => {
           !!state.selectedModel && isEmbedOnlyModel(state.selectedModel);
         const currentMissing =
           !!state.selectedModel &&
+          !isCloudModel(state.selectedModel) &&
           !models.some((m) => m.id === state.selectedModel);
 
         if (!state.selectedModel || currentIsBad || currentMissing) {
