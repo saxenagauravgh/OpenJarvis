@@ -166,7 +166,7 @@ export function MessageBubble({ message, isLive = false, onRetry, onContinue }: 
   }
 
   return (
-    <div className="group mb-6">
+    <div className="group mb-6" data-message-id={message.id}>
       {/* Deep Research timeline (steps + status) */}
       {(message.isResearch || (message.researchTraces && message.researchTraces.length > 0)) && (
         <ResearchTimeline

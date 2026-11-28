@@ -55,6 +55,40 @@ export function ChatArea() {
   // and browsers block that anyway: playback with no preceding user gesture is
   // rejected outright, so the failure would be silent in both senses.
   const streamingConversationRef = useRef<string | null>(null);
+  // Start speaking as soon as the answer begins to arrive, not when it ends.
+  const liveSpeechRef = useRef<{
+    id: string;
+    update: (content: string) => void;
+    end: (content?: string) => void;
+  } | null>(null);
+  const ttsAvailableNow = useTtsStore((s) => s.available);
+  useEffect(() => {
+    const last = messages[messages.length - 1];
+    const live = liveSpeechRef.current;
+    if (live && (!isCurrentChatStreaming || last?.id !== live.id)) {
+      // The reply is complete (or was left behind): speak what remains.
+      const finished = messages.find((m) => m.id === live.id);
+      live.end(finished ? stripThinkTags(finished.content) : undefined);
+      liveSpeechRef.current = null;
+    }
+    if (!speakReplies || !isCurrentChatStreaming || !streamState.content) return;
+    if (!last || last.role !== 'assistant') return;
+    const content = stripThinkTags(streamState.content);
+    if (liveSpeechRef.current) {
+      liveSpeechRef.current.update(content);
+      return;
+    }
+    const tts = useTtsStore.getState();
+    if (ttsAvailableNow !== true) {
+      void tts.ensureHealth();
+      return;
+    }
+    if (tts.autoSpokenId === last.id) return;
+    tts.markAutoSpoken(last.id);
+    liveSpeechRef.current = { id: last.id, ...tts.speakLive(last.id) };
+    liveSpeechRef.current.update(content);
+  }, [messages, streamState.content, isCurrentChatStreaming, speakReplies, ttsAvailableNow]);
+
   useEffect(() => {
     const last = messages[messages.length - 1];
     const tts = useTtsStore.getState();
@@ -87,7 +121,8 @@ export function ChatArea() {
       if (currentLast?.id !== completedMessageId || currentTts.available !== true) return;
       if (currentTts.autoSpokenId === completedMessageId) return;
       // Failed, blocked and empty replies are never read out as answers.
-      if (!isSpeakableReply(currentLast)) return;
+      // Nor is a reply the user interrupted.
+      if (!isSpeakableReply(currentLast) || currentLast.stopped) return;
 
       const text = stripThinkTags(currentLast.content);
       currentTts.markAutoSpoken(completedMessageId);

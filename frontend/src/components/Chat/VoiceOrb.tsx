@@ -1,3 +1,6 @@
+import { useEffect, useRef } from 'react';
+import { subscribeLevel } from '../../lib/voice-level';
+
 export type OrbState = 'idle' | 'listening' | 'transcribing' | 'thinking' | 'speaking';
 
 const STATUS: Record<OrbState, string> = {
@@ -16,9 +19,35 @@ const BARS = Array.from({ length: 16 }, (_, i) => i);
  * rings. Each state has its own motion so the user can tell at a glance
  * whether Jarvis is listening, thinking or speaking.
  */
-export function VoiceOrb({ state, size = 150 }: { state: OrbState; size?: number }) {
+export function VoiceOrb({
+  state,
+  size = 150,
+  hearing = false,
+}: {
+  state: OrbState;
+  size?: number;
+  /** The user's voice is being picked up right now. */
+  hearing?: boolean;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  // Follow the loudness of whoever is talking, without re-rendering.
+  useEffect(
+    () =>
+      subscribeLevel((level) => {
+        ref.current?.style.setProperty('--voice-level', level.toFixed(3));
+      }),
+    [],
+  );
+
   return (
-    <div className="voice-orb-wrap" data-state={state} role="status" aria-live="polite">
+    <div
+      ref={ref}
+      className="voice-orb-wrap"
+      data-state={state}
+      data-hearing={hearing}
+      role="status"
+      aria-live="polite"
+    >
       <div className="voice-orb" style={{ width: size, height: size }}>
         <span className="voice-orb-ripple" />
         <span className="voice-orb-ripple voice-orb-ripple--late" />

@@ -232,6 +232,8 @@ interface AppState {
   /** What the voice conversation is doing, shown by the orb beside the chat. */
   voiceOrbState: OrbState;
   setVoiceOrbState: (state: OrbState) => void;
+  userSpeaking: boolean;
+  setUserSpeaking: (speaking: boolean) => void;
 
   // Actions: models & server
   setModels: (models: ModelInfo[]) => void;
@@ -538,6 +540,8 @@ export const useAppStore = create<AppState>((set, get) => {
     setConversationMode: (on: boolean) => set({ conversationMode: on }),
     voiceOrbState: 'idle',
     setVoiceOrbState: (voiceOrbState: OrbState) => set({ voiceOrbState }),
+    userSpeaking: false,
+    setUserSpeaking: (userSpeaking: boolean) => set({ userSpeaking }),
 
     // ── Models & server ────────────────────────────────────────────
 

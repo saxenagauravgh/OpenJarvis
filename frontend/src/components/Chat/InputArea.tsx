@@ -9,7 +9,7 @@ import { listConnectors, getSyncStatus } from '../../lib/connectors-api';
 import { resolveChatEngine } from '../../lib/chat-telemetry';
 import { MicButton } from './MicButton';
 import type { OrbState } from './VoiceOrb';
-import { SpeechCaption } from './SpeechCaption';
+import { isEcho } from '../../lib/voice-detector';
 import { useSpeech } from '../../hooks/useSpeech';
 import { useTtsStore } from '../../lib/tts';
 import type {
@@ -149,6 +149,7 @@ export function InputArea() {
     stopRecording,
     cancelRecording,
     listen,
+    hearing,
   } = useSpeech();
   const conversationMode = useAppStore((s) => s.conversationMode);
   const setConversationMode = useAppStore((s) => s.setConversationMode);
@@ -540,71 +541,104 @@ export function InputArea() {
   const lastMessage = messages[messages.length - 1];
   const talkTurnRef = useRef(0);
 
+  const listeningRef = useRef(false);
+  const [listenRound, setListenRound] = useState(0);
+
+  /** Is Jarvis still producing, or about to speak, an answer? */
+  const jarvisBusy = useCallback(() => {
+    const app = useAppStore.getState();
+    const tts = useTtsStore.getState();
+    if (app.streamState.isStreaming || tts.state !== 'idle') return true;
+    if (phaseRef.current !== 'waiting' || tts.available !== true) return false;
+    const last = app.messages[app.messages.length - 1];
+    return !(last?.role === 'assistant' && tts.autoSpokenId === last.id);
+  }, []);
+
+  const pauseConversation = useCallback((message?: string) => {
+    setPhase('idle');
+    setConversationMode(false);
+    if (message) toast(message);
+  }, [setConversationMode, setPhase]);
+
+  /** One round of listening, which may begin while Jarvis is still answering. */
+  const runListen = useCallback(() => {
+    if (listeningRef.current || !conversationRef.current) return;
+    listeningRef.current = true;
+    if (phaseRef.current === 'idle') setPhase('listening');
+    let interrupted = '';
+    let wasInterrupted = false;
+
+    listen({
+      isBusy: jarvisBusy,
+      isPlaying: () => useTtsStore.getState().state === 'speaking',
+      onQuiet: () => setPhase('listening'),
+      onSpeech: (duringReply) => {
+        if (duringReply) {
+          wasInterrupted = true;
+          interrupted = useTtsStore.getState().caption?.text ?? '';
+          talkTurnRef.current += 1; // the old reply no longer drives the loop
+          abortTutorStream();
+          const tts = useTtsStore.getState();
+          const messagesNow = useAppStore.getState().messages;
+          const last = messagesNow[messagesNow.length - 1];
+          if (last?.role === 'assistant') tts.markAutoSpoken(last.id);
+          tts.stop();
+        }
+        setPhase('listening');
+      },
+    })
+      .then((heard) => {
+        listeningRef.current = false;
+        if (!conversationRef.current) {
+          setPhase('idle');
+          return;
+        }
+        const text = heard.trim();
+        if (wasInterrupted && (!text || isEcho(text, interrupted))) {
+          if (text) {
+            toast('Jarvis heard its own voice. Headphones make interrupting work better.');
+          }
+          setPhase('idle');
+          setListenRound((n) => n + 1);
+          return;
+        }
+        if (!text) {
+          pauseConversation('Conversation paused — click Talk to continue.');
+          return;
+        }
+        setPhase('waiting');
+        const turn = ++talkTurnRef.current;
+        void sendRef.current(text).catch(() => null).then((reply) => {
+          // ChatArea speaks an answer. Anything else would leave the loop
+          // waiting for speech that never comes, so pause it.
+          if (turn !== talkTurnRef.current || !conversationRef.current) return;
+          if (isSpeakableReply(reply)) return;
+          cancelRecording();
+          pauseConversation('Conversation paused: there was no answer to read. See the chat.');
+        });
+        setListenRound((n) => n + 1);
+      })
+      .catch(() => {
+        listeningRef.current = false;
+        pauseConversation();
+      });
+  }, [listen, jarvisBusy, cancelRecording, pauseConversation, setPhase]);
+
   useEffect(() => {
     if (!conversationMode) {
-      if (phaseRef.current === 'listening') cancelRecording();
+      if (listeningRef.current) cancelRecording();
       if (phaseRef.current !== 'idle') setPhase('idle');
       return;
     }
-    if (phaseRef.current === 'listening') return;
-    if (phaseRef.current === 'waiting') {
-      // Wait until the reply has finished streaming and been spoken.
-      const replySpoken =
-        ttsAvailable !== true ||
-        (lastMessage?.role === 'assistant' && autoSpokenId === lastMessage.id);
-      if (streamState.isStreaming || ttsState !== 'idle' || !replySpoken) return;
-      setPhase('idle');
-    }
-    if (streamState.isStreaming || ttsState !== 'idle' || speechState !== 'idle') return;
-
-    // Short pause so the mic does not catch the tail of Jarvis's voice.
-    const timer = window.setTimeout(() => {
-      if (!conversationRef.current || phaseRef.current !== 'idle') return;
-      setPhase('listening');
-      listen()
-        .then((heard) => {
-          if (!conversationRef.current) {
-            setPhase('idle');
-            return;
-          }
-          if (heard.trim()) {
-            setPhase('waiting');
-            const turn = ++talkTurnRef.current;
-            void sendRef.current(heard).catch(() => null).then((reply) => {
-              // ChatArea speaks an answer. Anything else would leave the loop
-              // waiting for speech that never comes, so pause it.
-              if (turn !== talkTurnRef.current || !conversationRef.current) return;
-              if (isSpeakableReply(reply)) return;
-              setPhase('idle');
-              setConversationMode(false);
-              toast('Conversation paused: there was no answer to read. See the chat.');
-            });
-          } else {
-            setPhase('idle');
-            setConversationMode(false);
-            toast('Conversation paused — click Talk to continue.');
-          }
-        })
-        .catch(() => {
-          setPhase('idle');
-          setConversationMode(false);
-        });
-    }, 500);
+    if (listeningRef.current || speechState !== 'idle') return;
+    // While waiting for an answer, start at once so it can be interrupted.
+    const delay = phaseRef.current === 'waiting' ? 100 : 300;
+    const timer = window.setTimeout(runListen, delay);
     return () => window.clearTimeout(timer);
-  }, [
-    conversationMode,
-    streamState.isStreaming,
-    ttsState,
-    ttsAvailable,
-    autoSpokenId,
-    speechState,
-    lastMessage?.id,
-    lastMessage?.role,
-    listen,
-    cancelRecording,
-    setConversationMode,
-    setPhase,
-  ]);
+  }, [conversationMode, listenRound, speechState, runListen, cancelRecording, setPhase]);
+
+  // Leaving the chat page must release the microphone.
+  useEffect(() => () => cancelRecording(), [cancelRecording]);
 
   const toggleConversation = useCallback(() => {
     // A reply still in flight belongs to the previous session.
@@ -640,6 +674,10 @@ export function InputArea() {
   useEffect(() => {
     setVoiceOrbState(orbState);
   }, [orbState, setVoiceOrbState]);
+  const setUserSpeaking = useAppStore((s) => s.setUserSpeaking);
+  useEffect(() => {
+    setUserSpeaking(hearing);
+  }, [hearing, setUserSpeaking]);
 
   const conversationLabel = !conversationMode
     ? 'Talk'
@@ -666,7 +704,6 @@ export function InputArea() {
 
   return (
     <div className="px-4 pb-4 pt-2" style={{ maxWidth: 'var(--chat-max-width)', margin: '0 auto', width: '100%' }}>
-      <SpeechCaption />
       <div className="mb-2 flex flex-col gap-1">
         <div className="flex items-center gap-2">
           <button

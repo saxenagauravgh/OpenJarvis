@@ -977,25 +977,39 @@
   text-align: center;
 }
 
-/* Words highlighted while a reply is read aloud */
-.speech-caption {
-  max-height: 7.5em;
-  overflow-y: auto;
-  margin-bottom: 10px;
-  padding: 10px 14px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  background: var(--color-surface);
-  font-size: 1.05rem;
-  line-height: 1.7;
+/* The sentence and word being read aloud, painted over the answer itself.
+   Literal colours: highlight pseudo-elements do not reliably read variables. */
+::highlight(speech-sentence) { background-color: rgba(56, 220, 255, 0.18); }
+::highlight(speech-word) { background-color: #38dcff; color: #01131c; }
+
+/* The moment the user speaks, the orb reacts */
+.voice-orb-wrap[data-hearing='true'] .voice-orb-core {
+  opacity: 1;
+  animation: orb-talk 0.35s ease-in-out infinite alternate;
 }
-.speech-word {
-  border-radius: 4px;
-  padding: 1px 2px;
+.voice-orb-wrap[data-hearing='true'] .voice-orb-bars rect {
+  opacity: 0.85;
+  animation: orb-bar 0.45s ease-in-out infinite alternate;
 }
-.speech-word--next { color: var(--color-text-tertiary); }
-.speech-word--spoken { color: var(--color-text); }
-.speech-word--current {
-  background: var(--color-accent);
-  color: var(--color-on-accent);
+
+/* While someone talks, the orb moves with the sound instead of a fixed loop */
+.voice-orb-wrap[data-state='speaking'] .voice-orb-core,
+.voice-orb-wrap[data-state='listening'] .voice-orb-core {
+  animation: none;
+  transform: scale(calc(0.82 + var(--voice-level, 0) * 0.55));
+  opacity: calc(0.6 + var(--voice-level, 0) * 0.4);
+  box-shadow:
+    0 0 calc(14px + var(--voice-level, 0) * 38px) calc(2px + var(--voice-level, 0) * 12px)
+      var(--color-accent-glow);
+  transition: transform 60ms linear, opacity 60ms linear, box-shadow 60ms linear;
 }
+.voice-orb-wrap[data-state='speaking'] .voice-orb-bars rect,
+.voice-orb-wrap[data-state='listening'] .voice-orb-bars rect {
+  animation: none;
+  opacity: calc(0.3 + var(--voice-level, 0) * 0.7);
+  transform: scaleY(calc(0.3 + var(--voice-level, 0) * var(--bar-reach, 1.3)));
+  transition: transform 60ms linear;
+}
+.voice-orb-bars g:nth-child(2n) rect { --bar-reach: 0.7; }
+.voice-orb-bars g:nth-child(3n) rect { --bar-reach: 1.7; }
+.voice-orb-bars g:nth-child(5n) rect { --bar-reach: 1; }
