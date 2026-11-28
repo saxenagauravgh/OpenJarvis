@@ -393,6 +393,33 @@ def _convert_tools_to_anthropic(
     return result
 
 
+# Gemini returns these when a model is overloaded or rate-limited. The SDK
+# retries them with backoff; if the model is still busy we fall back once
+# to a lighter model that is usually available.
+_GOOGLE_BUSY_CODES = (429, 500, 503, 504)
+_GOOGLE_FALLBACK_MODEL = "gemini-3.5-flash-lite"
+
+
+def _google_fallback_model(model: str, exc: BaseException) -> str | None:
+    """Model to retry with after *exc*, or None when there is no fallback."""
+    if getattr(exc, "code", None) not in _GOOGLE_BUSY_CODES:
+        return None
+    if model == _GOOGLE_FALLBACK_MODEL:
+        return None
+    return _GOOGLE_FALLBACK_MODEL
+
+
+def _google_ran_out_of_tokens(resp: Any) -> bool:
+    """True when Gemini stopped at the token limit without any answer parts."""
+    candidates = getattr(resp, "candidates", None)
+    if not candidates:
+        return False
+    reason = str(getattr(candidates[0], "finish_reason", "") or "")
+    content = getattr(candidates[0], "content", None)
+    has_parts = bool(getattr(content, "parts", None))
+    return "MAX_TOKENS" in reason and not has_parts
+
+
 def _sniff_image_mime(data: bytes) -> str:
     """Best-effort image MIME type from magic bytes (defaults to JPEG)."""
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -480,8 +507,19 @@ class CloudEngine(InferenceEngine):
         if gemini_key:
             try:
                 from google import genai
+                from google.genai import types as genai_types
 
-                self._google_client = genai.Client(api_key=gemini_key)
+                self._google_client = genai.Client(
+                    api_key=gemini_key,
+                    http_options=genai_types.HttpOptions(
+                        retry_options=genai_types.HttpRetryOptions(
+                            attempts=3,
+                            initial_delay=1.0,
+                            max_delay=8.0,
+                            http_status_codes=list(_GOOGLE_BUSY_CODES),
+                        )
+                    ),
+                )
             except ImportError:
                 pass
         openrouter_key = os.environ.get("OPENROUTER_API_KEY")
@@ -997,11 +1035,36 @@ class CloudEngine(InferenceEngine):
                     config.response_schema = response_format.schema
 
         t0 = time.monotonic()
-        resp = self._google_client.models.generate_content(
-            model=model,
-            contents=contents,
-            config=config,
-        )
+        try:
+            resp = self._google_client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=config,
+            )
+        except Exception as exc:
+            fallback = _google_fallback_model(model, exc)
+            if fallback is None:
+                raise
+            logger.warning(
+                "Gemini %s busy (%s); retrying with %s", model, exc, fallback
+            )
+            resp = self._google_client.models.generate_content(
+                model=fallback,
+                contents=contents,
+                config=config,
+            )
+        # Gemini 2.5+ "thinks" before answering; with a small token budget the
+        # thinking can use it all, leaving no answer. Retry once with more room.
+        if _google_ran_out_of_tokens(resp) and max_tokens < 8192:
+            logger.warning(
+                "Gemini %s hit the token limit before answering; retrying", model
+            )
+            config.max_output_tokens = min(max_tokens * 4, 8192)
+            resp = self._google_client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=config,
+            )
         elapsed = time.monotonic() - t0
 
         # Extract text and function_call parts from response
@@ -1009,7 +1072,9 @@ class CloudEngine(InferenceEngine):
         tool_calls: list[Dict[str, Any]] = []
         candidates = getattr(resp, "candidates", None)
         if candidates:
-            parts = getattr(candidates[0].content, "parts", [])
+            # ``content`` or ``content.parts`` can be None (e.g. when the token
+            # limit is hit before any output), so treat that as no parts.
+            parts = getattr(candidates[0].content, "parts", None) or []
             for part in parts:
                 if hasattr(part, "function_call") and part.function_call:
                     fc = part.function_call
@@ -1513,13 +1578,39 @@ class CloudEngine(InferenceEngine):
         if system_text:
             config.system_instruction = system_text
 
-        for chunk in self._google_client.models.generate_content_stream(
-            model=model,
-            contents=contents,
-            config=config,
-        ):
+        for chunk in self._open_google_stream(model, contents, config):
             if chunk.text:
                 yield chunk.text
+
+    def _open_google_stream(self, model: str, contents: Any, config: Any):
+        """Iterate a Gemini stream, falling back to a lighter model if busy.
+
+        The fallback only happens before the first chunk arrives, so a reply
+        is never stitched together from two different models.
+        """
+        stream = iter(
+            self._google_client.models.generate_content_stream(
+                model=model, contents=contents, config=config
+            )
+        )
+        try:
+            first = next(stream, None)
+        except Exception as exc:
+            fallback = _google_fallback_model(model, exc)
+            if fallback is None:
+                raise
+            logger.warning(
+                "Gemini %s busy (%s); retrying with %s", model, exc, fallback
+            )
+            stream = iter(
+                self._google_client.models.generate_content_stream(
+                    model=fallback, contents=contents, config=config
+                )
+            )
+            first = next(stream, None)
+        if first is not None:
+            yield first
+        yield from stream
 
     async def _stream_full_google(
         self,
@@ -1598,11 +1689,7 @@ class CloudEngine(InferenceEngine):
         tool_call_count = 0
         stream_id = uuid.uuid4().hex
         final_usage: Dict[str, Any] | None = None
-        for chunk in self._google_client.models.generate_content_stream(
-            model=model,
-            contents=contents,
-            config=config,
-        ):
+        for chunk in self._open_google_stream(model, contents, config):
             usage_metadata = getattr(chunk, "usage_metadata", None)
             if usage_metadata is not None:
                 prompt_tokens = getattr(usage_metadata, "prompt_token_count", 0) or 0

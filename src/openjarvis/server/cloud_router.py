@@ -7,6 +7,7 @@ httpx directly so no cloud SDK packages are required.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import json
@@ -304,34 +305,55 @@ async def _stream_google(
         },
     }
 
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{model}:streamGenerateContent?alt=sse"
-    )
+    from openjarvis.engine.cloud import _GOOGLE_BUSY_CODES, _GOOGLE_FALLBACK_MODEL
+
+    # Try the requested model (with backoff while Gemini reports it busy),
+    # then the lighter fallback model, before any text has been streamed.
+    attempts = [(model, 0.0), (model, 1.5), (model, 4.0)]
+    if model != _GOOGLE_FALLBACK_MODEL:
+        attempts.append((_GOOGLE_FALLBACK_MODEL, 0.0))
 
     async with httpx.AsyncClient(timeout=180) as client:
         # Send the key as a header, not a URL query, so it never appears in
         # logged request URLs or error messages.
         headers = {"x-goog-api-key": api_key}
-        async with client.stream("POST", url, json=payload, headers=headers) as resp:
-            resp.raise_for_status()
-            async for line in resp.aiter_lines():
-                if not line.startswith("data: "):
-                    continue
-                data = line[6:].strip()
-                try:
-                    chunk = json.loads(data)
-                    parts = (
-                        chunk.get("candidates", [{}])[0]
-                        .get("content", {})
-                        .get("parts", [])
+        for i, (attempt_model, delay) in enumerate(attempts):
+            if delay:
+                await asyncio.sleep(delay)
+            url = (
+                f"https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{attempt_model}:streamGenerateContent?alt=sse"
+            )
+            async with client.stream(
+                "POST", url, json=payload, headers=headers
+            ) as resp:
+                if resp.status_code in _GOOGLE_BUSY_CODES and i < len(attempts) - 1:
+                    logger.warning(
+                        "Gemini %s busy (HTTP %s); retrying",
+                        attempt_model,
+                        resp.status_code,
                     )
-                    for part in parts:
-                        text = part.get("text", "")
-                        if text:
-                            yield text
-                except Exception:
-                    pass
+                    continue
+                resp.raise_for_status()
+                async for chunk_text in _iter_google_sse(resp):
+                    yield chunk_text
+                return
+
+
+async def _iter_google_sse(resp: httpx.Response) -> AsyncIterator[str]:
+    """Yield text parts from a Gemini streamGenerateContent SSE response."""
+    async for line in resp.aiter_lines():
+        if not line.startswith("data: "):
+            continue
+        try:
+            chunk = json.loads(line[6:].strip())
+            parts = chunk.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+            for part in parts:
+                text = part.get("text", "")
+                if text:
+                    yield text
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
