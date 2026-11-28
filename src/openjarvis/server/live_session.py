@@ -296,6 +296,8 @@ class LiveBridge:
         self._turn_id = 1
         self._turn_active = False
         self._turn_has_audio = False
+        self._follow_up_due = False
+        self._awaiting_follow_up = False
         self._heard: list[str] = []
         self._said: list[str] = []
 
@@ -648,6 +650,9 @@ class LiveBridge:
         if content:
             heard = content.input_transcription
             if heard and heard.text:
+                if self._awaiting_follow_up:
+                    # The learner spoke again before the follow-up arrived.
+                    self._end_turn()
                 self._transcript("user", heard.text)
             for part in (content.model_turn and content.model_turn.parts) or []:
                 blob = part.inline_data
@@ -668,7 +673,13 @@ class LiveBridge:
 
         if content and content.turn_complete:
             self._completed_turn = True
-            self._end_turn()
+            if self._follow_up_due and not self._turn_has_audio:
+                # Only a tool was used so far; the spoken answer follows and
+                # belongs to this same turn.
+                self._follow_up_due = False
+                self._awaiting_follow_up = True
+            else:
+                self._end_turn()
 
     def _transcript(self, role: str, delta: str) -> None:
         self._turn_active = True
@@ -692,6 +703,7 @@ class LiveBridge:
         self._emit({"type": "turn_complete", "turnId": self._turn_id})
         self._turn_id += 1
         self._turn_active = self._turn_has_audio = False
+        self._follow_up_due = self._awaiting_follow_up = False
 
     async def _answer_call(self, session: Any, call: Any) -> None:
         from google.genai import types
@@ -713,6 +725,8 @@ class LiveBridge:
             if self._turn_has_audio
             else types.FunctionResponseScheduling.WHEN_IDLE
         )
+        if not self._turn_has_audio:
+            self._follow_up_due = True
         await session.send_tool_response(
             function_responses=types.FunctionResponse(
                 id=call.id, name=call.name, response=response, scheduling=scheduling

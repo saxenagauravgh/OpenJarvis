@@ -780,3 +780,28 @@ def test_real_sdk_accepts_the_configuration(monkeypatch):
     assert "NON_BLOCKING" in json.dumps(setup["tools"])
     assert "h-1" in json.dumps(setup)
     assert "thinking" not in json.dumps(setup).lower()
+
+
+def test_tool_only_turn_and_spoken_follow_up_share_one_turn(client, gemini):
+    """The board call's own turn_complete must not split the answer in two."""
+    args = {"title": "Newton", "markdown": "$F = ma$"}
+    with client.websocket_connect(URL) as ws:
+        ready(ws)
+        session = gemini.sessions[0]
+        session.push(tool("show_on_board", args), done())
+        assert event(ws)["type"] == "board"
+        session.push(server(model_turn=audio(b"aa")), said("F equals m a"), done())
+        assert ws.receive_bytes() == b"aa"
+        assert event(ws)["turnId"] == 1
+        assert event(ws) == {"type": "turn_complete", "turnId": 1}
+
+
+def test_speaking_again_closes_a_turn_still_awaiting_its_follow_up(client, gemini):
+    args = {"title": "Newton", "markdown": "$F = ma$"}
+    with client.websocket_connect(URL) as ws:
+        ready(ws)
+        session = gemini.sessions[0]
+        session.push(tool("show_on_board", args), done(), heard("next question"))
+        assert event(ws)["type"] == "board"
+        assert event(ws) == {"type": "turn_complete", "turnId": 1}
+        assert event(ws)["turnId"] == 2
