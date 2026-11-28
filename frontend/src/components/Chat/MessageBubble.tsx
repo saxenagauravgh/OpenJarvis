@@ -15,6 +15,7 @@ import { SpeakMessageButton } from './SpeakMessageButton';
 import { MessageError, MessageNotices, MessageOutcome } from './MessageStatus';
 import { SettingActionCard } from './SettingActionCard';
 import type { ChatMessage } from '../../types';
+import { useAppStore } from '../../lib/store';
 import { normalizeMathDelimiters, stripThinkTags } from '../../lib/message-text';
 import { formatFileSize } from '../../lib/chat/attachments';
 
@@ -118,6 +119,7 @@ function CopyMessageButton({ content }: { content: string }) {
 
 export function MessageBubble({ message, isLive = false, onRetry, onContinue }: Props) {
   const isUser = message.role === 'user';
+  const developerMode = useAppStore((s) => s.settings.developerMode);
 
   const cleanContent = useMemo(
     () => normalizeMathDelimiters(stripThinkTags(message.content)),
@@ -245,11 +247,13 @@ export function MessageBubble({ message, isLive = false, onRetry, onContinue }: 
           )}
         </div>
       )}
-      <XRayFooter
-        usage={message.usage}
-        telemetry={message.telemetry}
-        isResearch={message.isResearch}
-      />
+      {developerMode && (
+        <XRayFooter
+          usage={message.usage}
+          telemetry={message.telemetry}
+          isResearch={message.isResearch}
+        />
+      )}
     </div>
   );
 }

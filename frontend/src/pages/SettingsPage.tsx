@@ -482,6 +482,24 @@ export function SettingsPage() {
         <div className="flex flex-col gap-4">
           {/* Appearance */}
           <Section title="Appearance">
+            <SettingRow
+              label="Developer mode"
+              description="Show the dashboard, agents, logs, system panel and technical details"
+            >
+              <button
+                type="button"
+                role="switch"
+                aria-checked={settings.developerMode}
+                onClick={() => { updateSettings({ developerMode: !settings.developerMode }); showSaved(); }}
+                className="px-3 py-1.5 rounded-md text-xs font-medium cursor-pointer"
+                style={{
+                  background: settings.developerMode ? 'var(--color-accent)' : 'var(--color-bg-secondary)',
+                  color: settings.developerMode ? 'var(--color-on-accent)' : 'var(--color-text-secondary)',
+                }}
+              >
+                {settings.developerMode ? 'On' : 'Off'}
+              </button>
+            </SettingRow>
             <SettingRow label="Theme" description="Choose how OpenJarvis looks">
               <div className="flex gap-1 p-0.5 rounded-lg" style={{ background: 'var(--color-bg-secondary)' }}>
                 {themeOptions.map((opt) => {

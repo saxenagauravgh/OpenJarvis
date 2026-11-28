@@ -120,7 +120,9 @@ export function InputArea() {
   const setStreamState = useAppStore((s) => s.setStreamState);
   const resetStream = useAppStore((s) => s.resetStream);
   const modelLoading = useAppStore((s) => s.modelLoading);
-  const deepResearch = useAppStore((s) => s.deepResearch);
+  const developerMode = useAppStore((s) => s.settings.developerMode);
+  // Deep Research is a developer tool; it is off while hidden.
+  const deepResearch = useAppStore((s) => s.deepResearch && s.settings.developerMode);
   const setDeepResearch = useAppStore((s) => s.setDeepResearch);
   const corpusSync = useResearchCorpusSync(deepResearch);
   const isCurrentChatStreaming = streamState.isStreaming && streamState.conversationId === activeId;
@@ -736,6 +738,7 @@ export function InputArea() {
     <div className="px-4 pb-4 pt-2" style={{ maxWidth: 'var(--chat-max-width)', margin: '0 auto', width: '100%' }}>
       <div className="mb-2 flex flex-col gap-1">
         <div className="flex items-center gap-2">
+          {developerMode && (
           <button
             type="button"
             onClick={() => setDeepResearch(!deepResearch)}
@@ -752,6 +755,7 @@ export function InputArea() {
             <Search size={12} />
             Deep Research
           </button>
+          )}
           <button
             type="button"
             onClick={toggleConversation}

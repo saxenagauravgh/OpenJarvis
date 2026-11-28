@@ -24,6 +24,7 @@ export function ChatArea() {
   const messages = useAppStore((s) => s.messages);
   const streamState = useAppStore((s) => s.streamState);
   const systemPanelOpen = useAppStore((s) => s.systemPanelOpen);
+  const developerMode = useAppStore((s) => s.settings.developerMode);
   const toggleSystemPanel = useAppStore((s) => s.toggleSystemPanel);
   const navigate = useNavigate();
   const listRef = useRef<HTMLDivElement>(null);
@@ -205,6 +206,7 @@ export function ChatArea() {
     <div className="flex flex-col h-full">
       {/* Toggle bar */}
       <div className="flex items-center justify-end px-3 py-1.5 shrink-0">
+        {developerMode && (
         <button
           onClick={toggleSystemPanel}
           className="p-1.5 rounded-md transition-colors cursor-pointer"
@@ -213,10 +215,11 @@ export function ChatArea() {
         >
           <PanelIcon size={16} />
         </button>
+        )}
       </div>
 
       {/* Data sources banner */}
-      {hasConnectedSources === false && !bannerDismissed && (
+      {developerMode && hasConnectedSources === false && !bannerDismissed && (
         <div
           className="mx-4 mb-2 flex items-center gap-3 px-4 py-3 rounded-lg text-sm shrink-0"
           style={{
@@ -279,8 +282,9 @@ export function ChatArea() {
                 onMouseLeave={(e) => (e.currentTarget.style.borderColor = 'var(--color-border)')}
               >
                 <Database size={14} style={{ color: 'var(--color-accent)' }} />
-                Connect Data Sources
+                {developerMode ? 'Connect Data Sources' : 'Add study material'}
               </button>
+              {developerMode && (
               <button
                 onClick={() => { navigate('/data-sources'); setTimeout(() => window.dispatchEvent(new CustomEvent('switch-tab', { detail: 'messaging' })), 100); }}
                 className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-xs cursor-pointer transition-colors"
@@ -295,6 +299,7 @@ export function ChatArea() {
                 <MessageSquare size={14} style={{ color: 'var(--color-accent)' }} />
                 Set Up Messaging Channels
               </button>
+              )}
             </div>
           </div>
         ) : (

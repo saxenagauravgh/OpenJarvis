@@ -100,6 +100,8 @@ interface Settings {
   fontSize: 'small' | 'default' | 'large';
   /** How fast replies are read aloud; 1 is normal. */
   voiceSpeed: number;
+  /** Show developer tools (dashboard, agents, logs, system panel). */
+  developerMode: boolean;
   defaultModel: string;
   defaultAgent: string;
   temperature: number;
@@ -113,11 +115,12 @@ interface Settings {
 
 function loadSettings(): Settings {
   const defaults: Settings = {
-    theme: 'system',
+    theme: 'hud',
     apiUrl: '',
     apiKey: '',
     fontSize: 'default',
     voiceSpeed: 1,
+    developerMode: false,
     defaultModel: '',
     defaultAgent: '',
     temperature: 0.7,

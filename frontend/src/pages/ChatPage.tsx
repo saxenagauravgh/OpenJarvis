@@ -5,6 +5,7 @@ import { useAppStore } from '../lib/store';
 
 export function ChatPage() {
   const systemPanelOpen = useAppStore((s) => s.systemPanelOpen);
+  const developerMode = useAppStore((s) => s.settings.developerMode);
 
   return (
     <div className="flex h-full overflow-hidden">
@@ -12,7 +13,7 @@ export function ChatPage() {
         <ChatArea />
       </div>
       <SpeechHighlighter />
-      {systemPanelOpen && <SystemPanel />}
+      {developerMode && systemPanelOpen && <SystemPanel />}
     </div>
   );
 }
