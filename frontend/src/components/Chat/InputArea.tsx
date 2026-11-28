@@ -554,6 +554,27 @@ export function InputArea() {
     return !(last?.role === 'assistant' && tts.autoSpokenId === last.id);
   }, []);
 
+  /** Stop the reply being written or spoken, so the user can talk. */
+  const interruptJarvis = useCallback(() => {
+    talkTurnRef.current += 1; // the old reply no longer drives the loop
+    abortTutorStream();
+    const tts = useTtsStore.getState();
+    const messagesNow = useAppStore.getState().messages;
+    const last = messagesNow[messagesNow.length - 1];
+    if (last?.role === 'assistant') tts.markAutoSpoken(last.id);
+    tts.stop();
+  }, []);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && useTtsStore.getState().state !== 'idle') {
+        interruptJarvis();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [interruptJarvis]);
+
   const pauseConversation = useCallback((message?: string) => {
     setPhase('idle');
     setConversationMode(false);
@@ -576,13 +597,7 @@ export function InputArea() {
         if (duringReply) {
           wasInterrupted = true;
           interrupted = useTtsStore.getState().caption?.text ?? '';
-          talkTurnRef.current += 1; // the old reply no longer drives the loop
-          abortTutorStream();
-          const tts = useTtsStore.getState();
-          const messagesNow = useAppStore.getState().messages;
-          const last = messagesNow[messagesNow.length - 1];
-          if (last?.role === 'assistant') tts.markAutoSpoken(last.id);
-          tts.stop();
+          interruptJarvis();
         }
         setPhase('listening');
       },
@@ -622,7 +637,7 @@ export function InputArea() {
         listeningRef.current = false;
         pauseConversation();
       });
-  }, [listen, jarvisBusy, cancelRecording, pauseConversation, setPhase]);
+  }, [listen, jarvisBusy, interruptJarvis, cancelRecording, pauseConversation, setPhase]);
 
   useEffect(() => {
     if (!conversationMode) {
@@ -731,13 +746,19 @@ export function InputArea() {
           </button>
           {/* A small orb at the end of this row, while voice is in use. */}
           {(conversationMode || ttsState !== 'idle') && (
-            <div className="voice-orb-compact ml-auto">
+            <button
+              type="button"
+              onClick={interruptJarvis}
+              className="voice-orb-compact ml-auto cursor-pointer"
+              title="Click (or press Esc) to stop Jarvis and talk"
+              aria-label="Stop Jarvis and talk"
+            >
               <VoiceOrb
                 state={conversationMode ? orbState : 'speaking'}
                 size={52}
                 hearing={hearing}
               />
-            </div>
+            </button>
           )}
         </div>
         {attachedImages.length > 0 && (

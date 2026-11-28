@@ -31,7 +31,9 @@ export function useSpeech() {
     }
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
       streamRef.current = stream;
 
       const recorder = new MediaRecorder(stream);
@@ -161,10 +163,23 @@ export function useSpeech() {
       let recordingSince = waitingSince;
       let speechSince: number | null = null;
       let lastLoud = waitingSince;
+      let calibrated = false;
+      // Kept on this computer only, for tuning how easily Jarvis is interrupted.
+      const heardLevels = { whileReplying: 0, threshold: 0, interrupted: false };
 
       return new Promise<string>((resolve) => {
         const finish = (result: Promise<string> | string) => {
           void ctx.close().catch(() => {});
+          if (heardLevels.whileReplying > 0) {
+            try {
+              localStorage.setItem(
+                'openjarvis-voice-debug',
+                JSON.stringify({ ...heardLevels, at: new Date().toISOString() }),
+              );
+            } catch {
+              // Diagnostics only.
+            }
+          }
           Promise.resolve(result).then(resolve, () => resolve(''));
         };
         const tick = () => {
@@ -178,6 +193,10 @@ export function useSpeech() {
           for (const v of samples) sum += v * v;
           const rms = Math.sqrt(sum / samples.length);
           const now = performance.now();
+          if (busy && speechSince === null) {
+            heardLevels.whileReplying = Math.max(heardLevels.whileReplying, rms);
+            heardLevels.threshold = detector.threshold?.() ?? heardLevels.threshold;
+          }
           // Animate the orb with the user's voice (not with Jarvis's echo).
           if (speechSince !== null || !busy) publishLevel(rms * 7);
 
@@ -190,9 +209,10 @@ export function useSpeech() {
               restartRecorder();
               waitingSince = recordingSince = now;
               opts.onQuiet?.();
-            } else if (nowPlaying && !playing) {
-              // It has just started talking: measure its echo afresh.
+            } else if (nowPlaying && !playing && !calibrated) {
+              // It has just started talking: measure its echo, once per reply.
               detector = interruptDetector();
+              calibrated = true;
             } else if (stillBusy && now - recordingSince > 4000) {
               restartRecorder();
               recordingSince = now;
@@ -205,6 +225,7 @@ export function useSpeech() {
             lastLoud = now;
             if (speechSince === null) {
               speechSince = now;
+              heardLevels.interrupted = busy;
               setHearing(true);
               opts.onSpeech?.(busy);
               // After an interruption the room is quiet again.
@@ -227,9 +248,18 @@ export function useSpeech() {
             finish('');
             return;
           }
-          window.setTimeout(tick, 50);
+          window.setTimeout(step, 50);
         };
-        window.setTimeout(tick, 50);
+        // A failure must end this round, or listening would never restart.
+        const step = () => {
+          try {
+            tick();
+          } catch {
+            cancelRecording();
+            finish('');
+          }
+        };
+        window.setTimeout(step, 50);
       });
     },
     [startRecording, stopRecording, cancelRecording],

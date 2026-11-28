@@ -19,6 +19,8 @@ from fastapi import (
 )
 from pydantic import BaseModel
 
+from openjarvis.speech._languages import allowed_languages, transcribe_in
+
 logger = logging.getLogger(__name__)
 
 # ---- Request/Response models ----
@@ -1017,13 +1019,23 @@ async def transcribe_speech(request: Request):
     filename = getattr(audio_file, "filename", "audio.wav")
     ext = filename.rsplit(".", 1)[-1] if "." in filename else "wav"
 
+    # A language sent with the request wins over the configured one(s).
+    speech = getattr(getattr(request.app.state, "config", None), "speech", None)
+    setting = getattr(speech, "language", "")
+    allowed = allowed_languages(setting if isinstance(setting, str) else "")
+
     try:
-        result = await asyncio.to_thread(
-            backend.transcribe,
-            audio_bytes,
-            format=ext,
-            language=language or None,
-        )
+        if language or not allowed:
+            result = await asyncio.to_thread(
+                backend.transcribe,
+                audio_bytes,
+                format=ext,
+                language=language or None,
+            )
+        else:
+            result = await asyncio.to_thread(
+                transcribe_in, backend, audio_bytes, format=ext, allowed=allowed
+            )
     except Exception as exc:
         logger.exception("Speech transcription failed")
         raise HTTPException(

@@ -3,6 +3,8 @@
 export interface VoiceDetector {
   /** Feed one level reading; true while sustained speech is present. */
   push: (rms: number, now: number) => boolean;
+  /** Level currently needed to count as speech, once known. */
+  threshold?: () => number;
 }
 
 const clamp = (value: number, min: number, max: number) =>
@@ -34,12 +36,14 @@ export function quietDetector(): VoiceDetector {
 
 /**
  * For interrupting while Jarvis talks. It first measures how loudly its own
- * voice reaches the microphone, then needs clearly louder, longer speech.
+ * voice reaches the microphone, then needs clearly louder, sustained speech.
+ * Echo cancellation also quietens the user during playback, so the bar is low;
+ * `isEcho` catches Jarvis hearing itself.
  */
 export function interruptDetector(calibrationMs = 700): VoiceDetector {
   let started: number | null = null;
   const echo: number[] = [];
-  const held = sustained(300);
+  const held = sustained(200);
   let threshold = 0;
   return {
     push: (rms, now) => {
@@ -49,12 +53,14 @@ export function interruptDetector(calibrationMs = 700): VoiceDetector {
         return false;
       }
       if (!threshold) {
+        // The upper quartile, so a word spoken during calibration counts less.
         const sorted = [...echo].sort((a, b) => a - b);
-        const loudEcho = sorted[Math.floor(sorted.length * 0.9)] ?? 0;
-        threshold = clamp(loudEcho * 2.5, 0.05, 0.2);
+        const loudEcho = sorted[Math.floor(sorted.length * 0.75)] ?? 0;
+        threshold = clamp(loudEcho * 1.7, 0.025, 0.12);
       }
       return held(rms > threshold, now);
     },
+    threshold: () => threshold,
   };
 }
 

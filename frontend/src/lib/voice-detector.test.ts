@@ -32,7 +32,14 @@ describe('interruptDetector', () => {
     const echo = run(0.03, 60);
     expect(firstDetection(interruptDetector(), echo)).toBeNull();
     const withUser = [...run(0.03, 30), ...run(0.15, 20)];
-    expect(firstDetection(interruptDetector(), withUser)).toBe(1800);
+    expect(firstDetection(interruptDetector(), withUser)).toBe(1700);
+  });
+});
+
+describe('interrupting with a quiet voice', () => {
+  it('hears a user only moderately louder than the echo', () => {
+    const levels = [...run(0.008, 30), ...run(0.04, 20)];
+    expect(firstDetection(interruptDetector(), levels)).not.toBeNull();
   });
 });
 
