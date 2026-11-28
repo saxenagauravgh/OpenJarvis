@@ -13,7 +13,7 @@ import { rehypeCitations } from '../../lib/rehype-citations';
 import { XRayFooter } from './XRayFooter';
 import { SpeakMessageButton } from './SpeakMessageButton';
 import type { ChatMessage } from '../../types';
-import { stripThinkTags } from '../../lib/message-text';
+import { normalizeMathDelimiters, stripThinkTags } from '../../lib/message-text';
 
 interface Props {
   message: ChatMessage;
@@ -112,7 +112,10 @@ function CopyMessageButton({ content }: { content: string }) {
 export function MessageBubble({ message, isLive = false }: Props) {
   const isUser = message.role === 'user';
 
-  const cleanContent = useMemo(() => stripThinkTags(message.content), [message.content]);
+  const cleanContent = useMemo(
+    () => normalizeMathDelimiters(stripThinkTags(message.content)),
+    [message.content],
+  );
 
   // Build a ref→source lookup once per render. Memoized so the rehype plugin
   // identity stays stable until the source list actually changes.

@@ -46,3 +46,12 @@ describe('toSpeakableText maths', () => {
     expect(toSpeakableText('The pH is 2.')).toBe('The pH is 2.');
   });
 });
+
+describe('normalizeMathDelimiters', () => {
+  it('converts \\( \\) and \\[ \\] to dollar delimiters', async () => {
+    const { normalizeMathDelimiters } = await import('./message-text');
+    expect(normalizeMathDelimiters('p = \\(\\frac{5}{8}\\)')).toBe('p = $\\frac{5}{8}$');
+    expect(normalizeMathDelimiters('\\[ x^2 \\]')).toBe('$$ x^2 $$');
+    expect(normalizeMathDelimiters('no maths here')).toBe('no maths here');
+  });
+});

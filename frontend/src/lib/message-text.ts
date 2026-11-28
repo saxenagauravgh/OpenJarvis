@@ -1,5 +1,15 @@
 /** Text helpers shared between the message renderer and voice output. */
 
+/**
+ * Rewrite LaTeX \(...\) and \[...\] delimiters (common in local-model output)
+ * as $...$ and $$...$$, which the markdown math renderer understands.
+ */
+export function normalizeMathDelimiters(text: string): string {
+  return text
+    .replace(/\\\[([\s\S]+?)\\\]/g, (_m, expr: string) => `$$${expr}$$`)
+    .replace(/\\\(([\s\S]+?)\\\)/g, (_m, expr: string) => `$${expr}$`);
+}
+
 /** Remove <think> reasoning blocks so they are neither shown nor spoken. */
 export function stripThinkTags(text: string): string {
   let cleaned = text.replace(/<think>[\s\S]*?<\/think>\s*/gi, '');
