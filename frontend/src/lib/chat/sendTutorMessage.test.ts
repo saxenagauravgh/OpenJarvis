@@ -64,7 +64,13 @@ async function load() {
   return { store: useAppStore, chat, send, messages };
 }
 
-const image = { name: 'q.jpg', dataUrl: 'data:image/jpeg;base64,QUJD' };
+const file = {
+  id: 'att1',
+  name: 'q.jpg',
+  mime: 'image/jpeg',
+  size: 3,
+  kind: 'image' as const,
+};
 
 describe('sendTutorMessage', () => {
   it('streams a reply and records how it was answered', async () => {
@@ -181,51 +187,82 @@ describe('sendTutorMessage', () => {
     expect(messages()).toHaveLength(4);
   });
 
-  it('sends images with the current message only and does not save them', async () => {
-    replies.push(sse(delta('a1'), done()), sse(delta('a2'), done()));
-    const { send, messages } = await load();
-
-    await send('read this', { images: [image] });
-    await send('and now?');
-
-    expect(requests[0].messages[0].images).toEqual(['QUJD']);
-    expect(requests[1].messages.every((m: any) => !('images' in m))).toBe(true);
-    expect(messages()[0].attachments).toEqual(['q.jpg']);
-    expect(localStorage.getItem('openjarvis-conversations')).not.toContain('QUJD');
-  });
-
-  it('retries a failed reply in place, with its images', async () => {
-    replies.push(sse(failure), sse(delta('answer'), done()));
+  it('keeps files with the conversation and sends their ids on every turn', async () => {
+    replies.push(sse(delta('a1'), done('length')), sse(delta('a2'), done()));
     const { store, chat, send, messages } = await load();
-    const failed = await send('read this', { images: [image] });
 
-    const result = await chat.retryTutorMessage(
-      store.getState().activeId!,
-      failed!.id,
-      'gemini-2.5-flash',
-    );
+    await send('read this', { files: [{ ...file, warning: 'Only 3 pages read.' }] });
+    await chat.continueTutorMessage(store.getState().activeId!, 'gemini-2.5-flash');
 
-    expect(result.status).toBe('sent');
-    expect(requests[1].messages).toEqual([
-      { role: 'user', content: 'read this', images: ['QUJD'] },
+    expect(requests[0].messages).toEqual([
+      { role: 'user', content: 'read this', files: ['att1'] },
     ]);
-    expect(messages().map((m) => m.content)).toEqual(['read this', 'answer']);
-    expect(messages()[1].error).toBeUndefined();
+    expect(requests[1].messages).toEqual([
+      { role: 'user', content: 'read this', files: ['att1'] },
+      { role: 'assistant', content: 'a1' },
+      { role: 'user', content: 'Continue exactly where you stopped.' },
+    ]);
+    expect(messages()[0].files).toEqual([file]);
+    const saved = JSON.parse(localStorage.getItem('openjarvis-conversations')!);
+    expect(Object.values<any>(saved.conversations)[0].messages[0].files).toEqual([file]);
   });
 
-  it('does not retry an image question once the images are gone', async () => {
-    replies.push(sse(failure));
+  it('retries a failed reply in place, with its files, after a relaunch', async () => {
+    replies.push(sse(failure), sse(delta('answer'), done()));
     const first = await load();
-    const failed = await first.send('read this', { images: [image] });
+    const failed = await first.send('read this', { files: [file] });
     const conversationId = first.store.getState().activeId!;
 
     vi.resetModules(); // relaunch
     const { chat, messages } = await load();
     const result = await chat.retryTutorMessage(conversationId, failed!.id, 'gemini-2.5-flash');
 
+    expect(result.status).toBe('sent');
+    expect(requests[1].messages).toEqual([
+      { role: 'user', content: 'read this', files: ['att1'] },
+    ]);
+    expect(messages().map((m) => m.content)).toEqual(['read this', 'answer']);
+    expect(messages()[1].error).toBeUndefined();
+  });
+
+  it('does not retry an older image question, whose images were not kept', async () => {
+    const { store, chat, messages } = await load();
+    const conversationId = store.getState().createConversation('gemini-2.5-flash');
+    store.getState().addMessage(conversationId, {
+      id: 'q',
+      role: 'user',
+      content: 'read this',
+      timestamp: 0,
+      attachments: ['q.jpg'],
+    });
+    store.getState().addMessage(conversationId, {
+      id: 'r',
+      role: 'assistant',
+      content: '',
+      timestamp: 0,
+      error: { code: 'busy', message: 'The model is busy.', retryable: true },
+    });
+
+    const result = await chat.retryTutorMessage(conversationId, 'r', 'gemini-2.5-flash');
+
     expect(result.status).toBe('images-missing');
-    expect(requests).toHaveLength(1);
+    expect(requests).toHaveLength(0);
     expect(messages()[1].error).toBeDefined();
+  });
+
+  it('records a missing attachment notice', async () => {
+    replies.push(
+      sse(
+        frame('notice', { code: 'attachment_missing', message: 'q.jpg is no longer available.' }),
+        delta('hi'),
+        done(),
+      ),
+    );
+    const { send } = await load();
+
+    expect((await send('q', { files: [file] }))?.notices).toEqual([
+      { code: 'attachment_missing', message: 'q.jpg is no longer available.' },
+    ]);
   });
 
   it('keeps what arrived when the user stops, without an error', async () => {

@@ -45,6 +45,30 @@ describe('buildTutorHistory', () => {
     ]);
   });
 
+  it('sends the file ids of every user turn that has them', () => {
+    const file = (id: string) => ({
+      id,
+      name: `${id}.pdf`,
+      mime: 'application/pdf',
+      size: 10,
+      kind: 'pdf' as const,
+    });
+
+    const history = buildTutorHistory([
+      message('user', 'q1', { files: [file('f1'), file('f2')] }),
+      message('assistant', 'a1'),
+      message('user', 'q2', { files: [] }),
+      message('user', 'q3', { files: [file('f3')] }),
+    ]);
+
+    expect(history).toEqual([
+      { role: 'user', content: 'q1', files: ['f1', 'f2'] },
+      { role: 'assistant', content: 'a1' },
+      { role: 'user', content: 'q2' },
+      { role: 'user', content: 'q3', files: ['f3'] },
+    ]);
+  });
+
   it('never sends system messages or stored extras', () => {
     const history = buildTutorHistory([
       message('system' as ChatMessage['role'], 'be rude'),

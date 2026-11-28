@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import socket
+import time
 import traceback
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -36,6 +37,11 @@ logger = logging.getLogger(__name__)
 GOOGLE_BUSY_CODES = (429, 500, 503, 504)
 GOOGLE_FALLBACK_MODEL = "gemini-3.5-flash-lite"
 GOOGLE_KEY_NAMES = ("GEMINI_API_KEY", "GOOGLE_API_KEY")
+# ``Message.metadata`` key for extra Gemini parts (files) of a user message.
+GEMINI_PARTS_KEY = "gemini_parts"
+# Longest wait for a Files API upload, and again for its processing.
+FILE_UPLOAD_TIMEOUT_SECONDS = 120.0
+FILE_POLL_SECONDS = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +118,47 @@ async def close_client(client: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Files API
+# ---------------------------------------------------------------------------
+
+
+class FileProcessingError(RuntimeError):
+    """Gemini accepted an upload but could not make it ready to use."""
+
+
+@dataclass(frozen=True)
+class UploadedFile:
+    uri: str
+    #: Unix time at which Gemini deletes the file, if it says.
+    expires_at: Optional[float] = None
+
+
+async def upload_file(client: Any, source: Any, *, mime_type: str) -> UploadedFile:
+    """Upload a path or binary stream and wait until Gemini can use it."""
+    timeout = FILE_UPLOAD_TIMEOUT_SECONDS
+    uploaded = await asyncio.wait_for(
+        client.aio.files.upload(file=source, config={"mime_type": mime_type}),
+        timeout,
+    )
+    deadline = time.monotonic() + timeout
+    while True:
+        state = getattr(uploaded, "state", None)
+        state = getattr(state, "name", state)
+        if state == "ACTIVE":
+            break
+        if state == "FAILED" or time.monotonic() >= deadline:
+            raise FileProcessingError("Gemini could not process the file")
+        await asyncio.sleep(FILE_POLL_SECONDS)
+        uploaded = await asyncio.wait_for(
+            client.aio.files.get(name=uploaded.name), timeout
+        )
+    if not uploaded.uri:
+        raise FileProcessingError("Gemini returned no address for the file")
+    expires = getattr(uploaded, "expiration_time", None)
+    return UploadedFile(uploaded.uri, expires.timestamp() if expires else None)
+
+
+# ---------------------------------------------------------------------------
 # Request building
 # ---------------------------------------------------------------------------
 
@@ -128,10 +175,10 @@ def sniff_image_mime(data: bytes) -> str:
 
 
 def user_parts(message: Message) -> List[Dict[str, Any]]:
-    """Gemini ``parts`` for a user message: its text plus any inline images."""
+    """Gemini ``parts`` for a user message: files, text and inline images."""
     images = message.images or []
-    parts: List[Dict[str, Any]] = []
-    if message.content or not images:
+    parts: List[Dict[str, Any]] = list(message.metadata.get(GEMINI_PARTS_KEY) or [])
+    if message.content or not (images or parts):
         parts.append({"text": message.content or ""})
     for image_b64 in images:
         try:
@@ -609,11 +656,14 @@ def log_failure(log: logging.Logger, label: str, exc: BaseException) -> None:
 
 
 __all__ = [
+    "GEMINI_PARTS_KEY",
     "GOOGLE_BUSY_CODES",
     "GOOGLE_FALLBACK_MODEL",
     "ErrorInfo",
+    "FileProcessingError",
     "GeminiEvent",
     "MissingAPIKeyError",
+    "UploadedFile",
     "build_config",
     "build_contents",
     "chunk_finish_reason",
@@ -631,6 +681,7 @@ __all__ = [
     "redact",
     "sniff_image_mime",
     "stream_text",
+    "upload_file",
     "usage_from",
     "user_parts",
 ]

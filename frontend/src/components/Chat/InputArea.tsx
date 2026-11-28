@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { Send, Square, Paperclip, Search, AudioLines, X } from 'lucide-react';
+import { Send, Square, Paperclip, Search, AudioLines } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAppStore, generateId } from '../../lib/store';
 import { streamResearch } from '../../lib/sse';
@@ -11,6 +11,9 @@ import { MicButton } from './MicButton';
 import { VoiceOrb, type OrbState } from './VoiceOrb';
 import { isEcho } from '../../lib/voice-detector';
 import { useSpeech } from '../../hooks/useSpeech';
+import { useAttachments } from '../../hooks/useAttachments';
+import { AttachmentChip } from './AttachmentChip';
+import { FILE_ACCEPT, MAX_FILES } from '../../lib/chat/attachments';
 import { useTtsStore } from '../../lib/tts';
 import type {
   ChatMessage,
@@ -79,39 +82,6 @@ function useResearchCorpusSync(enabled: boolean): {
   return state;
 }
 
-interface AttachedImage {
-  id: string;
-  name: string;
-  dataUrl: string;
-}
-
-const MAX_IMAGES = 4;
-
-/** Read an image file, downscaled to at most `maxDim` px, as a JPEG data URL. */
-async function imageFileToDataUrl(file: File, maxDim = 1600): Promise<string> {
-  const objectUrl = URL.createObjectURL(file);
-  try {
-    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-      const el = new Image();
-      el.onload = () => resolve(el);
-      el.onerror = () => reject(new Error(`Could not read ${file.name || 'image'}`));
-      el.src = objectUrl;
-    });
-    const scale = Math.min(1, maxDim / Math.max(img.naturalWidth, img.naturalHeight));
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
-    canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
-    const ctx = canvas.getContext('2d');
-    if (!ctx) throw new Error('Could not process image');
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL('image/jpeg', 0.85);
-  } finally {
-    URL.revokeObjectURL(objectUrl);
-  }
-}
-
 /** Rough check for models that can read images (cloud models and local vision models). */
 function modelSeesImages(model: string): boolean {
   return /^(gemini|gpt-|o[134]-|claude)/.test(model) || /(vl|vision|llava|moondream|gemma3)/i.test(model);
@@ -119,7 +89,21 @@ function modelSeesImages(model: string): boolean {
 
 export function InputArea() {
   const [input, setInput] = useState('');
-  const [attachedImages, setAttachedImages] = useState<AttachedImage[]>([]);
+  const {
+    items: attachments,
+    addFiles,
+    removeFile,
+    isUploading,
+    whenUploaded,
+    takeUploaded,
+  } = useAttachments();
+  const uploading = attachments.some((item) => item.status === 'uploading');
+  const hasUploaded = attachments.some((item) => item.status === 'ready');
+  const attachedCount = attachments.filter((item) => item.status !== 'failed').length;
+  // For the voice loop: which turn is current, and spoken questions that are
+  // waiting for an upload.
+  const talkTurnRef = useRef(0);
+  const uploadWaitsRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -219,51 +203,64 @@ export function InputArea() {
     resetStream();
   }, [resetStream]);
 
-  const addImageFiles = useCallback(async (files: File[]) => {
-    const images = files.filter((f) => f.type.startsWith('image/'));
-    if (images.length === 0) return;
-    const room = MAX_IMAGES - attachedImages.length;
-    if (room <= 0) {
-      toast.error(`You can attach up to ${MAX_IMAGES} images per message`);
-      return;
-    }
-    const added: AttachedImage[] = [];
-    for (const file of images.slice(0, room)) {
-      try {
-        added.push({ id: generateId(), name: file.name || 'image.jpg', dataUrl: await imageFileToDataUrl(file) });
-      } catch (err: any) {
-        toast.error(err?.message || 'Could not read image');
-      }
-    }
-    if (added.length) setAttachedImages((prev) => [...prev, ...added].slice(0, MAX_IMAGES));
-  }, [attachedImages.length]);
-
   /** Send the typed or spoken question; resolves with the finished reply. */
   const sendMessage = useCallback(async (spokenText?: string): Promise<ChatMessage | null> => {
-    const images = attachedImages;
     const typed = (spokenText ?? input).trim();
-    const content = typed || (images.length ? 'Please help me with the question in this image.' : '');
-    if (!content || streamState.isStreaming) return null;
+    if (streamState.isStreaming) return null;
+
+    if (!deepResearch && isUploading()) {
+      // Typed messages are sent by the user once the uploads have finished. A
+      // spoken one waits for them, unless the user moves on meanwhile.
+      if (spokenText === undefined) {
+        toast('Wait for the upload to finish, then send.');
+        return null;
+      }
+      const turn = talkTurnRef.current;
+      uploadWaitsRef.current += 1;
+      await whenUploaded();
+      uploadWaitsRef.current -= 1;
+      if (turn !== talkTurnRef.current || useAppStore.getState().streamState.isStreaming) {
+        setInput((prev) => prev || typed);
+        return null;
+      }
+    }
+
+    // Deep Research cannot read files; they stay attached.
+    if (deepResearch && attachedCount > 0) {
+      toast.warning(
+        'Deep Research ignores attached files. Turn it off to ask about them.',
+      );
+    }
+    if (!typed && (deepResearch || !hasUploaded)) return null;
     if (!selectedModel) {
       toast.error('Pick a model first (⌘K)');
       return null;
     }
 
     setInput('');
-    setAttachedImages([]);
-    if (images.length && !modelSeesImages(selectedModel)) {
-      toast.warning(`${selectedModel} may not be able to read images. Try gemini-2.5-flash.`);
-    }
 
     // Everything but Deep Research goes to the tutor route.
     if (!deepResearch) {
+      const files = takeUploaded();
+      const images = files.filter((file) => file.kind === 'image').length;
+      if (images && !modelSeesImages(selectedModel)) {
+        toast.warning(`${selectedModel} may not be able to read images. Try gemini-2.5-flash.`);
+      }
+      const content =
+        typed ||
+        (files.length > 1
+          ? 'Please help me with the attached files.'
+          : images
+            ? 'Please help me with the question in this image.'
+            : 'Please help me with the attached file.');
       return sendTutorMessage({
         conversationId: activeId,
         model: selectedModel,
         content,
-        images,
+        files,
       });
     }
+    const content = typed;
 
     let convId = activeId;
     if (!convId) {
@@ -275,7 +272,6 @@ export function InputArea() {
       role: 'user',
       content,
       timestamp: Date.now(),
-      attachments: images.length ? images.map((img) => img.name) : undefined,
     };
     addMessage(convId, userMsg);
 
@@ -511,7 +507,11 @@ export function InputArea() {
     return { ...assistantMsg, ...finished };
   }, [
     input,
-    attachedImages,
+    attachedCount,
+    hasUploaded,
+    isUploading,
+    whenUploaded,
+    takeUploaded,
     activeId,
     selectedModel,
     streamState.isStreaming,
@@ -539,7 +539,6 @@ export function InputArea() {
     setConversationPhase(phase);
   }, []);
   const lastMessage = messages[messages.length - 1];
-  const talkTurnRef = useRef(0);
 
   const listeningRef = useRef(false);
   const [listenRound, setListenRound] = useState(0);
@@ -549,6 +548,7 @@ export function InputArea() {
     const app = useAppStore.getState();
     const tts = useTtsStore.getState();
     if (app.streamState.isStreaming || tts.state !== 'idle') return true;
+    if (uploadWaitsRef.current > 0) return true;
     if (phaseRef.current !== 'waiting' || tts.available !== true) return false;
     const last = app.messages[app.messages.length - 1];
     return !(last?.role === 'assistant' && tts.autoSpokenId === last.id);
@@ -695,12 +695,35 @@ export function InputArea() {
         : 'Jarvis thinking…';
 
   const handlePaste = (e: React.ClipboardEvent) => {
-    const files = Array.from(e.clipboardData.files || []).filter((f) => f.type.startsWith('image/'));
+    const files = Array.from(e.clipboardData.files || []);
     if (files.length) {
       e.preventDefault();
-      void addImageFiles(files);
+      addFiles(files);
     }
   };
+
+  // Files can be dropped anywhere on the chat page.
+  useEffect(() => {
+    const onDragOver = (event: DragEvent) => {
+      if (!event.dataTransfer?.types.includes('Files')) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'copy';
+    };
+    const onDrop = (event: DragEvent) => {
+      if (!event.dataTransfer?.types.includes('Files')) return;
+      event.preventDefault();
+      addFiles(Array.from(event.dataTransfer.files));
+    };
+    window.addEventListener('dragover', onDragOver);
+    window.addEventListener('drop', onDrop);
+    return () => {
+      window.removeEventListener('dragover', onDragOver);
+      window.removeEventListener('drop', onDrop);
+    };
+  }, [addFiles]);
+
+  const sendBlockedByUpload = uploading && !deepResearch;
+  const canSend = !!input.trim() || hasUploaded;
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -761,26 +784,10 @@ export function InputArea() {
             </button>
           )}
         </div>
-        {attachedImages.length > 0 && (
+        {attachments.length > 0 && (
           <div className="flex flex-wrap gap-2 pt-1">
-            {attachedImages.map((img) => (
-              <div
-                key={img.id}
-                className="relative rounded-lg overflow-hidden"
-                style={{ border: '1px solid var(--color-border)' }}
-                title={img.name}
-              >
-                <img src={img.dataUrl} alt={img.name} className="h-14 w-14 object-cover" />
-                <button
-                  type="button"
-                  onClick={() => setAttachedImages((prev) => prev.filter((i) => i.id !== img.id))}
-                  className="absolute top-0.5 right-0.5 rounded-full p-0.5 cursor-pointer"
-                  style={{ background: 'rgba(0,0,0,0.6)', color: 'white' }}
-                  aria-label={`Remove ${img.name}`}
-                >
-                  <X size={10} />
-                </button>
-              </div>
+            {attachments.map((item) => (
+              <AttachmentChip key={item.key} item={item} onRemove={removeFile} />
             ))}
           </div>
         )}
@@ -808,23 +815,23 @@ export function InputArea() {
         <input
           ref={fileInputRef}
           type="file"
-          accept="image/*"
+          accept={FILE_ACCEPT}
           multiple
           className="hidden"
           onChange={(e) => {
             const files = Array.from(e.target.files || []);
             e.target.value = '';
-            void addImageFiles(files);
+            addFiles(files);
           }}
         />
         <button
           type="button"
           onClick={() => fileInputRef.current?.click()}
-          disabled={streamState.isStreaming || attachedImages.length >= MAX_IMAGES}
+          disabled={streamState.isStreaming || attachedCount >= MAX_FILES}
           className="p-1.5 rounded-lg transition-colors shrink-0 cursor-pointer disabled:opacity-30 disabled:cursor-default"
           style={{ color: 'var(--color-text-tertiary)' }}
-          title="Attach an image (photo of a question, diagram, notes)"
-          aria-label="Attach image"
+          title="Attach images or documents (PDF, DOCX, TXT, MD, CSV)"
+          aria-label="Attach files"
         >
           <Paperclip size={16} />
         </button>
@@ -861,15 +868,20 @@ export function InputArea() {
               onClick={() => void sendMessage()}
               disabled={
                 streamState.isStreaming ||
-                (!input.trim() && attachedImages.length === 0) ||
+                sendBlockedByUpload ||
+                !canSend ||
                 modelLoading ||
                 !selectedModel
               }
-              title={selectedModel ? 'Send message' : 'Pick a model first (⌘K)'}
+              title={
+                !selectedModel
+                  ? 'Pick a model first (⌘K)'
+                  : sendBlockedByUpload ? 'Waiting for uploads to finish' : 'Send message'
+              }
               className="p-2 rounded-xl transition-colors shrink-0 cursor-pointer disabled:opacity-30 disabled:cursor-default"
               style={{
-                background: input.trim() || attachedImages.length ? 'var(--color-accent)' : 'var(--color-bg-tertiary)',
-                color: input.trim() || attachedImages.length ? 'white' : 'var(--color-text-tertiary)',
+                background: canSend ? 'var(--color-accent)' : 'var(--color-bg-tertiary)',
+                color: canSend ? 'white' : 'var(--color-text-tertiary)',
               }}
             >
               <Send size={16} />

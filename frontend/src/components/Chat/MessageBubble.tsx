@@ -5,7 +5,7 @@ import rehypeKatex from 'rehype-katex';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import 'katex/dist/katex.min.css';
-import { Copy, Check } from 'lucide-react';
+import { Copy, Check, FileText, Image as ImageIcon } from 'lucide-react';
 import { AudioPlayer } from './AudioPlayer';
 import { ToolCallCard } from './ToolCallCard';
 import { ResearchTimeline } from './ResearchTimeline';
@@ -16,6 +16,7 @@ import { MessageError, MessageNotices, MessageOutcome } from './MessageStatus';
 import { SettingActionCard } from './SettingActionCard';
 import type { ChatMessage } from '../../types';
 import { normalizeMathDelimiters, stripThinkTags } from '../../lib/message-text';
+import { formatFileSize } from '../../lib/chat/attachments';
 
 interface Props {
   message: ChatMessage;
@@ -158,6 +159,25 @@ export function MessageBubble({ message, isLive = false, onRetry, onContinue }: 
               {message.attachments.map((name, i) => (
                 <span key={`${name}-${i}`} className="mr-2">📎 {name}</span>
               ))}
+            </div>
+          )}
+          {message.files && message.files.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 mb-1.5" style={{ whiteSpace: 'normal' }}>
+              {message.files.map((file) => {
+                const Icon = file.kind === 'image' ? ImageIcon : FileText;
+                return (
+                  <span
+                    key={file.id}
+                    className="inline-flex items-center gap-1.5 max-w-full rounded-md px-2 py-1 text-xs"
+                    style={{ border: '1px solid color-mix(in srgb, currentColor 30%, transparent)' }}
+                    title={file.name}
+                  >
+                    <Icon size={12} className="shrink-0" />
+                    <span className="truncate">{file.name}</span>
+                    <span className="shrink-0 opacity-70">{formatFileSize(file.size)}</span>
+                  </span>
+                );
+              })}
             </div>
           )}
           {message.content}

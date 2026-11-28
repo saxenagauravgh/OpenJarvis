@@ -66,8 +66,8 @@ export async function* readSSE(
 export interface TutorMessage {
   role: 'user' | 'assistant';
   content: string;
-  /** Base64 image data, without the `data:` URL prefix. */
-  images?: string[];
+  /** Ids of uploaded attachments. */
+  files?: string[];
 }
 
 export interface TutorChatRequest {

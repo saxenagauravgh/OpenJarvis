@@ -54,6 +54,20 @@ describe('message text direction', () => {
   });
 });
 
+describe('files on a question', () => {
+  it('shows file chips, and the names saved by earlier versions', () => {
+    const html = render({
+      role: 'user',
+      content: 'q',
+      files: [{ id: 'f1', name: 'notes.pdf', mime: 'application/pdf', size: 2048, kind: 'pdf' }],
+    });
+
+    expect(html).toContain('notes.pdf');
+    expect(html).toContain('2 KB');
+    expect(render({ role: 'user', content: 'q', attachments: ['old.jpg'] })).toContain('old.jpg');
+  });
+});
+
 describe('reply status', () => {
   const error = { code: 'busy', message: 'The model is busy.', retryable: true };
   const html = (message: Partial<ChatMessage>, actions = true) =>

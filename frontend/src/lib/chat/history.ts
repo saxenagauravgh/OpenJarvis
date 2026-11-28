@@ -14,7 +14,12 @@ export function buildTutorHistory(messages: ChatMessage[]): TutorMessage[] {
   const history: TutorMessage[] = [];
   for (const message of messages) {
     if (message.role === 'user') {
-      history.push({ role: 'user', content: message.content });
+      const files = message.files?.map((file) => file.id);
+      history.push({
+        role: 'user',
+        content: message.content,
+        ...(files?.length ? { files } : {}),
+      });
     } else if (message.role === 'assistant' && !message.error) {
       const content = stripThinkTags(message.content);
       if (content && !LEGACY_FAILURE_TEXT.test(content)) {

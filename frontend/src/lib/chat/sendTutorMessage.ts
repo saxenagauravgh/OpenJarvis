@@ -4,6 +4,7 @@ import { fetchSavings } from '../api';
 import { buildTutorHistory } from './history';
 import { parseAction } from '../setting-actions';
 import type {
+  ChatAttachment,
   ChatMessage,
   FinishReason,
   MessageError,
@@ -13,29 +14,20 @@ import type {
 
 export const CONTINUE_PROMPT = 'Continue exactly where you stopped.';
 
-export interface PendingImage {
-  name: string;
-  /** `data:` URL of the image. */
-  dataUrl: string;
-}
-
 export interface SendTutorOptions {
   /** Conversation to send in; a new one is created when null. */
   conversationId: string | null;
   model: string;
   content: string;
-  images?: PendingImage[];
+  /** Uploaded files to send with the message. */
+  files?: ChatAttachment[];
 }
 
 export type RetryResult =
   | { status: 'sent'; reply: ChatMessage }
-  /** The question had images that are no longer held, so it was not resent. */
+  /** An earlier version sent images that were not kept, so it was not resent. */
   | { status: 'images-missing' }
   | { status: 'unavailable' };
-
-// Images are not saved with the conversation. Those of a question that has not
-// been answered yet are held in memory so that Retry can send them again.
-let unanswered: { messageId: string; images: PendingImage[] } | null = null;
 
 let activeRun: AbortController | null = null;
 
@@ -51,10 +43,6 @@ function conversationMessages(conversationId: string): ChatMessage[] {
   return conversation?.messages ?? [];
 }
 
-function toBase64(dataUrl: string): string {
-  return dataUrl.startsWith('data:') ? dataUrl.slice(dataUrl.indexOf(',') + 1) : dataUrl;
-}
-
 /**
  * Add the user's message and stream the tutor's reply to it. Resolves with the
  * finished reply, or null if nothing was sent.
@@ -63,7 +51,7 @@ export async function sendTutorMessage({
   conversationId,
   model,
   content,
-  images = [],
+  files = [],
 }: SendTutorOptions): Promise<ChatMessage | null> {
   const store = useAppStore.getState();
   if (!content || !model || store.streamState.isStreaming) return null;
@@ -74,12 +62,13 @@ export async function sendTutorMessage({
     role: 'user',
     content,
     timestamp: Date.now(),
-    attachments: images.length ? images.map((img) => img.name) : undefined,
+    files: files.length
+      ? files.map(({ id, name, mime, size, kind }) => ({ id, name, mime, size, kind }))
+      : undefined,
   };
   store.addMessage(convId, question);
-  unanswered = images.length ? { messageId: question.id, images } : null;
 
-  return streamReply(convId, model, question, images);
+  return streamReply(convId, model, question);
 }
 
 /** Replace a failed reply, which must be the last message, with a new attempt. */
@@ -101,11 +90,12 @@ export async function retryTutorMessage(
   ) {
     return { status: 'unavailable' };
   }
-  const images = unanswered?.messageId === question.id ? unanswered.images : [];
-  if (question.attachments?.length && !images.length) return { status: 'images-missing' };
+  if (question.attachments?.length && !question.files?.length) {
+    return { status: 'images-missing' };
+  }
 
   store.removeMessage(conversationId, failed.id);
-  return { status: 'sent', reply: await streamReply(conversationId, model, question, images) };
+  return { status: 'sent', reply: await streamReply(conversationId, model, question) };
 }
 
 /** Ask the tutor to carry on with a reply that hit the length limit. */
@@ -120,16 +110,11 @@ async function streamReply(
   convId: string,
   model: string,
   question: ChatMessage,
-  images: PendingImage[],
 ): Promise<ChatMessage> {
   const store = useAppStore.getState();
 
-  // Built before the reply placeholder exists. Images go only with the message
-  // being answered, which is the last one.
+  // Built before the reply placeholder exists.
   const history = buildTutorHistory(conversationMessages(convId));
-  if (images.length) {
-    history[history.length - 1].images = images.map((img) => toBase64(img.dataUrl));
-  }
 
   const reply: ChatMessage = {
     id: generateId(),
@@ -226,8 +211,6 @@ async function streamReply(
       retryable: true,
     };
   }
-  if (!error && !stopped && unanswered?.messageId === question.id) unanswered = null;
-
   const totalMs = Date.now() - startTime;
   const finished: Partial<ChatMessage> = {
     content,

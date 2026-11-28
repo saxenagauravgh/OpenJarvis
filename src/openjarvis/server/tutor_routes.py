@@ -1,11 +1,16 @@
-"""``POST /v1/tutor/chat`` — the tutor's direct, streaming chat endpoint.
+"""The tutor's direct, streaming chat endpoint and its file uploads.
+
+``POST /v1/tutor/attachments`` stores a document or image; user turns of
+``POST /v1/tutor/chat`` then name it by id in ``files``.
+
 
 It talks to the model itself (no server agent, no tools) and streams
 server-sent events:
 
 ``meta``    ``{"model", "provider": "gemini"|"local"}``
 ``delta``   ``{"text"}``
-``notice``  ``{"code": "fallback_model"|"fallback_local", "message"}``
+``notice``  ``{"code": "fallback_model"|"fallback_local"|"attachment_missing",
+            "message"}``
 ``done``    ``{"finish_reason": "stop"|"length"|"blocked", "usage"}``
 ``error``   ``{"code", "message", "retryable"}``
 
@@ -30,6 +35,7 @@ from typing import Any, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from starlette.datastructures import UploadFile
 
 from openjarvis.core.config import DEFAULT_CONFIG_DIR
 from openjarvis.core.events import EventType
@@ -40,7 +46,12 @@ from openjarvis.core.types import (
     TelemetryRecord,
 )
 from openjarvis.engine import google_common
-from openjarvis.server import cloud_router, tutor_settings
+from openjarvis.server import (
+    attachments,
+    cloud_router,
+    tutor_attachments,
+    tutor_settings,
+)
 from openjarvis.server.origin import require_trusted_origin
 from openjarvis.server.routes import (
     _ensure_identity_prompt,
@@ -58,6 +69,10 @@ TUTOR_MAX_OUTPUT_TOKENS = 8192
 LOCAL_FALLBACK_MODEL = "qwen2.5:3b"
 # Longest wait for the next piece of a Gemini reply (thinking included).
 GEMINI_IDLE_TIMEOUT_SECONDS = 120.0
+
+# Room for the multipart boundaries and fields around an uploaded file.
+_FORM_OVERHEAD_BYTES = 64 * 1024
+_UPLOAD_STATUS = {"too_large": 413, "unsupported": 415, "empty": 400, "unreadable": 422}
 
 _ZERO_USAGE = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
@@ -77,6 +92,8 @@ class TutorMessage(BaseModel):
     role: str
     content: str = ""
     images: Optional[List[str]] = None
+    #: Ids returned by ``POST /v1/tutor/attachments``.
+    files: Optional[List[str]] = None
 
 
 class TutorChatRequest(BaseModel):
@@ -136,9 +153,14 @@ def _conversation(turns: list[TutorMessage]) -> list[Message]:
                     f"\n\n[{unreadable} attached image(s) could not be read. Tell "
                     "the learner and do not guess what they show.]"
                 )
-            if content.strip() or images:
+            if content.strip() or images or turn.files:
                 messages.append(
-                    Message(role=Role.USER, content=content, images=images or None)
+                    Message(
+                        role=Role.USER,
+                        content=content,
+                        images=images or None,
+                        metadata={"files": turn.files} if turn.files else {},
+                    )
                 )
         elif turn.role == "assistant" and turn.content.strip():
             messages.append(Message(role=Role.ASSISTANT, content=turn.content))
@@ -228,29 +250,57 @@ async def _attempt(
 ) -> AsyncIterator[Any]:
     """Events (``text`` / ``finish_reason`` / ``usage``) from one model."""
     if candidate.provider == "gemini":
+        async with aclosing(_gemini_attempt(candidate.model, messages)) as events:
+            async for event in events:
+                yield event
+        return
+
+    from openjarvis.engine.ollama import _default_num_ctx
+
+    prepared = await asyncio.to_thread(tutor_attachments.for_local, messages)
+    events = cloud_router.stream_local_events(
+        candidate.model,
+        prepared if sees_images else _without_images(prepared),
+        TUTOR_TEMPERATURE,
+        TUTOR_MAX_OUTPUT_TOKENS,
+        num_ctx=_default_num_ctx(),
+        include_images=sees_images,
+    )
+    async with aclosing(events):
+        async for event in events:
+            yield event
+
+
+async def _gemini_attempt(model: str, messages: list[Message]) -> AsyncIterator[Any]:
+    """Stream from Gemini, uploading again once if a cached file was refused."""
+    for retried in (False, True):
+        prepared, reused = messages, []
+        api_key = google_common.load_api_key()
+        # Without a key, stream_text reports that; nothing is uploaded.
+        if api_key:
+            prepared, reused = await tutor_attachments.for_gemini(messages, api_key)
         events = google_common.stream_text(
-            candidate.model,
-            messages,
+            model,
+            prepared,
             temperature=TUTOR_TEMPERATURE,
             max_tokens=TUTOR_MAX_OUTPUT_TOKENS,
             allow_fallback=False,
             idle_timeout=GEMINI_IDLE_TIMEOUT_SECONDS,
             functions=[tutor_settings.declaration()],
         )
-    else:
-        from openjarvis.engine.ollama import _default_num_ctx
-
-        events = cloud_router.stream_local_events(
-            candidate.model,
-            messages if sees_images else _without_images(messages),
-            TUTOR_TEMPERATURE,
-            TUTOR_MAX_OUTPUT_TOKENS,
-            num_ctx=_default_num_ctx(),
-            include_images=sees_images,
-        )
-    async with aclosing(events):
-        async for event in events:
-            yield event
+        started = False
+        try:
+            async with aclosing(events):
+                async for event in events:
+                    started = True
+                    yield event
+            return
+        except Exception as exc:
+            stale = reused and getattr(exc, "code", None) in (400, 403, 404)
+            if retried or started or not stale:
+                raise
+            logger.warning("Gemini refused a cached file; uploading it again")
+            await asyncio.to_thread(tutor_attachments.forget_uploads, reused)
 
 
 def _record(
@@ -333,7 +383,18 @@ async def _tutor_events(
     chain, unsupported = await asyncio.to_thread(
         _candidates, model, getattr(state, "engine", None)
     )
-    has_images = any(message.images for message in messages)
+    messages = await asyncio.to_thread(tutor_attachments.resolve, messages)
+    if tutor_attachments.has_missing(messages):
+        yield _sse(
+            "notice",
+            {
+                "code": "attachment_missing",
+                "message": tutor_attachments.MISSING_MESSAGE,
+            },
+        )
+    has_images = any(m.images for m in messages) or tutor_attachments.has_images(
+        messages
+    )
     primary_error: Optional[google_common.ErrorInfo] = None
     index = 0
     # Why the next candidate differs from what was asked for, if it does.
@@ -477,6 +538,81 @@ async def _guarded(events: AsyncIterator[str]) -> AsyncIterator[str]:
     except Exception as exc:
         google_common.log_failure(logger, "Tutor stream failed", exc)
         yield _error_event(google_common.error_info("internal"))
+
+
+def _upload_error(status: int, code: str, message: str) -> HTTPException:
+    return HTTPException(status_code=status, detail={"code": code, "message": message})
+
+
+def _refusal(error: attachments.AttachmentError) -> HTTPException:
+    return _upload_error(_UPLOAD_STATUS[error.code], error.code, error.message)
+
+
+class _BodyTooLarge(Exception):
+    pass
+
+
+def _capped_request(request: Request, limit: int) -> Request:
+    """The same request, failing as soon as its body grows past *limit*."""
+    received = 0
+
+    async def receive() -> Any:
+        nonlocal received
+        message = await request.receive()
+        received += len(message.get("body", b""))
+        if received > limit:
+            raise _BodyTooLarge
+        return message
+
+    return Request(request.scope, receive)
+
+
+@router.post("/attachments", dependencies=[Depends(require_trusted_origin)])
+async def upload_attachment(request: Request) -> dict[str, Any]:
+    """Store a file (multipart ``file`` and ``adultConfirmed``) for the tutor."""
+    # The form is read here, not by FastAPI, so that an untrusted or oversized
+    # request is refused before its body is written to disk.
+    limit = attachments.MAX_FILE_BYTES + _FORM_OVERHEAD_BYTES
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > limit:
+        raise _refusal(attachments.too_large())
+    unreadable = _upload_error(
+        422, "unreadable", "The upload could not be read. Please try again."
+    )
+    try:
+        form = await _capped_request(request, limit).form(max_files=1, max_fields=4)
+    except _BodyTooLarge:
+        raise _refusal(attachments.too_large()) from None
+    except Exception as exc:
+        logger.warning("Could not read an upload: %s", type(exc).__name__)
+        raise unreadable from None
+    try:
+        if form.get("adultConfirmed") != "true":
+            raise _upload_error(
+                403,
+                "age_unconfirmed",
+                "Please confirm that you are 18 or older to use the tutor.",
+            )
+        upload = form.get("file")
+        if not isinstance(upload, UploadFile):
+            raise _upload_error(400, "empty", "Choose a file to attach.")
+        try:
+            stored = await asyncio.to_thread(
+                attachments.save, upload.file, upload.filename
+            )
+        except attachments.AttachmentError as exc:
+            raise _refusal(exc) from None
+        except Exception as exc:
+            google_common.log_failure(logger, "Could not store an upload", exc)
+            raise _upload_error(
+                422,
+                "unreadable",
+                "The file could not be saved. Check the free space on this "
+                "computer and try again.",
+            ) from None
+        return stored.public()
+    finally:
+        await form.close()
 
 
 @router.post("/chat", dependencies=[Depends(require_trusted_origin)])

@@ -130,6 +130,15 @@ export interface MessageNotice {
 
 export type FinishReason = 'stop' | 'length' | 'blocked';
 
+/** An uploaded file, as returned by POST /v1/tutor/attachments. */
+export interface ChatAttachment {
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+  kind: 'image' | 'pdf' | 'text';
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -142,7 +151,9 @@ export interface ChatMessage {
   usage?: TokenUsage;
   telemetry?: MessageTelemetry;
   audio?: { url: string };
-  /** File names of images sent with this message (image data is not stored). */
+  /** Files sent with this message, held by the server (data is not stored). */
+  files?: ChatAttachment[];
+  /** File names of images sent by earlier versions (image data was not stored). */
   attachments?: string[];
   error?: MessageError;
   notices?: MessageNotice[];
