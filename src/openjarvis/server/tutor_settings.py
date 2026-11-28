@@ -39,7 +39,11 @@ def declaration() -> dict[str, Any]:
             "Propose a change to this app's own settings when the user asks for "
             "it. theme: light, dark, system or hud (the blue sci-fi look). "
             "font_size: small, default or large. voice_speed: a number from "
-            "0.7 (slow) to 1.4 (fast), 1.0 is normal. model: "
+            "0.7 (slow) to 1.4 (fast), 1.0 is normal. A request to talk slower "
+            "or faster is a settings request in any language: 'speak slowly', "
+            "'thoda dheere bolo' or 'धीरे बोलो' means voice_speed 0.85; "
+            "'thoda tez bolo' means 1.2. Call this instead of just agreeing. "
+            "model: "
             + ", ".join(CHOICES["model"])
             + ". The user must confirm before anything changes. Do not call it "
             "for questions about studying."
