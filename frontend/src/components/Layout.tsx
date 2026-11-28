@@ -7,6 +7,7 @@ import { useAppStore } from '../lib/store';
 import { checkHealth } from '../lib/api';
 
 export function Layout() {
+  const developerMode = useAppStore((s) => s.settings.developerMode);
   const sidebarOpen = useAppStore((s) => s.sidebarOpen);
   const [apiReachable, setApiReachable] = useState<boolean | null>(null);
 
@@ -28,7 +29,7 @@ export function Layout() {
     <div className="flex flex-col h-full w-full overflow-hidden relative" style={{ paddingTop: '3px' }}>
       <div className="hud-backdrop" aria-hidden="true" />
       <SystemPulse apiReachable={apiReachable} />
-      <ApprovalBell />
+      {developerMode && <ApprovalBell />}
 
       {/* Health check banner */}
       {apiReachable === false && (

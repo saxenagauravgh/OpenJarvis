@@ -53,3 +53,57 @@ describe('message text direction', () => {
     expect(html).toContain('<td dir="auto">English</td>');
   });
 });
+
+describe('files on a question', () => {
+  it('shows file chips, and the names saved by earlier versions', () => {
+    const html = render({
+      role: 'user',
+      content: 'q',
+      files: [{ id: 'f1', name: 'notes.pdf', mime: 'application/pdf', size: 2048, kind: 'pdf' }],
+    });
+
+    expect(html).toContain('notes.pdf');
+    expect(html).toContain('2 KB');
+    expect(render({ role: 'user', content: 'q', attachments: ['old.jpg'] })).toContain('old.jpg');
+  });
+});
+
+describe('reply status', () => {
+  const error = { code: 'busy', message: 'The model is busy.', retryable: true };
+  const html = (message: Partial<ChatMessage>, actions = true) =>
+    renderToStaticMarkup(
+      <MessageBubble
+        message={{ id: 'm1', timestamp: 0, role: 'assistant', content: '', ...message } as ChatMessage}
+        onRetry={actions ? () => {} : undefined}
+        onContinue={actions ? () => {} : undefined}
+      />,
+    );
+
+  it('shows an error as a card with Retry, apart from any text', () => {
+    const out = html({ content: 'partial', error });
+
+    expect(out).toContain('role="alert"');
+    expect(out).toContain('The model is busy.');
+    expect(out).toContain('Retry');
+    expect(out).toContain('partial');
+    expect(html({ error }, false)).not.toContain('Retry');
+  });
+
+  it('shows fallback notices', () => {
+    const out = html({
+      content: 'x',
+      notices: [{ code: 'fallback_model', message: 'Switched to a backup model.' }],
+    });
+
+    expect(out).toContain('Switched to a backup model.');
+  });
+
+  it('offers Continue only for a reply cut off by length', () => {
+    expect(html({ content: 'x', finishReason: 'length' })).toContain('Continue');
+    expect(html({ content: 'x', finishReason: 'stop' })).not.toContain('Continue');
+  });
+
+  it('says when a reply was blocked', () => {
+    expect(html({ finishReason: 'blocked' })).toContain('blocked');
+  });
+});

@@ -3,12 +3,10 @@ import { Loader2, CheckCircle2, XCircle, Cpu, Server, Database } from 'lucide-re
 import {
   getSetupStatus,
   fetchModels,
-  fetchRecommendedModel,
   resetInferenceSource,
   type SetupStatus,
 } from '../lib/api';
 import { useAppStore } from '../lib/store';
-import { isEmbedOnlyModel } from '../lib/model-capabilities';
 import { InferenceRecoveryButton, InferenceSourceSetup } from './InferenceSourceSetup';
 
 const STEPS = [
@@ -90,25 +88,15 @@ export function SetupScreen({ onReady }: { onReady: () => void }) {
     setStatusChecked(true);
     if (s?.phase === 'ready' && !handedOffRef.current) {
       handedOffRef.current = true;
-      // Pre-select a model BEFORE handing off so the chat is usable on
-      // first send. Without this, the main app's post-mount fetch can
-      // lose a race to a fast first message and Ollama 400s.
+      // Load the model list BEFORE handing off so the selection is checked
+      // against it before a fast first message. The saved model (or the
+      // default cloud model) is kept; local models are the server's fallback.
       try {
-        const [models, rec] = await Promise.all([
-          fetchModels().catch(() => []),
-          fetchRecommendedModel().catch(() => ({ model: '', reason: '' })),
-        ]);
+        const models = await fetchModels().catch(() => []);
         const store = useAppStore.getState();
-        const hadSelection = !!store.selectedModel;
-        store.setModels(models);
+        // An empty list means the fetch failed or is early: keep the selection.
+        if (models.length) store.setModels(models);
         store.setModelsLoading(false);
-        const chatModels = models.filter((m) => !isEmbedOnlyModel(m.id));
-        const recommended = rec.model && chatModels.some((m) => m.id === rec.model)
-          ? rec.model
-          : chatModels[0]?.id || '';
-        if (recommended && !hadSelection) {
-          store.setSelectedModel(recommended);
-        }
       } catch {
         // Non-fatal: store.setModels auto-selects on later fetch, and
         // the InputArea guards the empty-model case with a toast.
@@ -181,7 +169,7 @@ export function SetupScreen({ onReady }: { onReady: () => void }) {
               ? 'Checking your saved setup...'
               : status?.source === 'custom'
                 ? 'Connecting to your AI server...'
-                : 'Setting up your local AI...'}
+                : 'Setting up your tutor...'}
           </p>
         </div>
 

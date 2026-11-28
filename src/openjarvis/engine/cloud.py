@@ -5,6 +5,7 @@ OpenAI, Anthropic, Google, MiniMax, DeepSeek, and Atlas Cloud API backends.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -17,6 +18,7 @@ import httpx
 
 from openjarvis.core.registry import EngineRegistry
 from openjarvis.core.types import Message
+from openjarvis.engine import google_common
 from openjarvis.engine._base import (
     EngineConnectionError,
     InferenceEngine,
@@ -391,6 +393,28 @@ def _convert_tools_to_anthropic(
     return result
 
 
+# Names kept here for callers of the cloud engine; the Gemini logic lives in
+# ``engine/google_common.py``.
+_GOOGLE_BUSY_CODES = google_common.GOOGLE_BUSY_CODES
+_GOOGLE_FALLBACK_MODEL = google_common.GOOGLE_FALLBACK_MODEL
+_google_fallback_model = google_common.fallback_model
+_sniff_image_mime = google_common.sniff_image_mime
+_google_user_parts = google_common.user_parts
+# Saved Gemini thought signatures; the oldest are dropped past this many.
+_MAX_THOUGHT_SIGNATURES = 4096
+
+
+def _google_ran_out_of_tokens(resp: Any) -> bool:
+    """True when Gemini stopped at the token limit without any answer parts."""
+    candidates = getattr(resp, "candidates", None)
+    if not candidates:
+        return False
+    reason = str(getattr(candidates[0], "finish_reason", "") or "")
+    content = getattr(candidates[0], "content", None)
+    has_parts = bool(getattr(content, "parts", None))
+    return "MAX_TOKENS" in reason and not has_parts
+
+
 def _convert_tools_to_google(
     openai_tools: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
@@ -444,14 +468,11 @@ class CloudEngine(InferenceEngine):
                 self._anthropic_client = anthropic.Anthropic()
             except ImportError:
                 pass
-        gemini_key = os.environ.get("GEMINI_API_KEY") or os.environ.get(
-            "GOOGLE_API_KEY"
-        )
+        gemini_key = google_common.load_api_key()
         if gemini_key:
             try:
-                from google import genai
-
-                self._google_client = genai.Client(api_key=gemini_key)
+                self._google_client = google_common.create_client(gemini_key)
+                self._google_api_key = gemini_key
             except ImportError:
                 pass
         openrouter_key = os.environ.get("OPENROUTER_API_KEY")
@@ -882,73 +903,19 @@ class CloudEngine(InferenceEngine):
         **kwargs: Any,
     ) -> Dict[str, Any]:
         if self._google_client is None:
-            raise EngineConnectionError(
+            raise google_common.MissingAPIKeyError(
                 "Google client not available — set "
                 "GEMINI_API_KEY or GOOGLE_API_KEY and install "
                 "openjarvis[inference-google]"
             )
-        # Build contents from messages, converting tool roles for Gemini
-        system_text = ""
-        contents: List[Dict[str, Any]] = []
-        for m in messages:
-            if m.role.value == "system":
-                system_text = m.content
-            elif m.role.value == "tool":
-                # Gemini expects function responses as role="user" with
-                # function_response parts
-                fn_resp_part = {
-                    "function_response": {
-                        "name": m.name or "unknown",
-                        "response": {"result": m.content},
-                    }
-                }
-                # Merge consecutive tool results into a single user message
-                if (
-                    contents
-                    and contents[-1]["role"] == "user"
-                    and contents[-1]["parts"]
-                    and "function_response" in contents[-1]["parts"][-1]
-                ):
-                    contents[-1]["parts"].append(fn_resp_part)
-                else:
-                    contents.append({"role": "user", "parts": [fn_resp_part]})
-            elif m.role.value == "assistant" and m.tool_calls:
-                # Convert assistant tool_calls to function_call parts
-                parts: List[Dict[str, Any]] = []
-                if m.content:
-                    parts.append({"text": m.content})
-                for tc in m.tool_calls:
-                    args = tc.arguments
-                    if isinstance(args, str):
-                        try:
-                            args = json.loads(args)
-                        except (json.JSONDecodeError, TypeError):
-                            args = {"input": args}
-                    fc_part: Dict[str, Any] = {
-                        "function_call": {
-                            "name": tc.name,
-                            "args": args if isinstance(args, dict) else {},
-                        }
-                    }
-                    # Replay thought_signature for Gemini reasoning models
-                    sig = self._thought_sigs.get(tc.id)
-                    if sig is not None:
-                        fc_part["thought_signature"] = sig
-                    parts.append(fc_part)
-                contents.append({"role": "model", "parts": parts})
-            elif m.role.value == "assistant":
-                contents.append({"role": "model", "parts": [{"text": m.content}]})
-            else:
-                contents.append({"role": "user", "parts": [{"text": m.content}]})
-
-        from google.genai import types as genai_types
-
-        config = genai_types.GenerateContentConfig(
+        system_text, contents = google_common.build_contents(
+            messages, self._thought_sigs
+        )
+        config = google_common.build_config(
             temperature=temperature,
             max_output_tokens=max_tokens,
+            system_instruction=system_text,
         )
-        if system_text:
-            config.system_instruction = system_text
 
         # Convert and pass tools in Google format
         raw_tools = kwargs.pop("tools", None)
@@ -966,12 +933,46 @@ class CloudEngine(InferenceEngine):
                 if response_format.schema:
                     config.response_schema = response_format.schema
 
+        # Held locally so the client outlives the call if another event loop
+        # replaces it (see ``_google_async_client``).
+        client = self._google_client
         t0 = time.monotonic()
-        resp = self._google_client.models.generate_content(
-            model=model,
-            contents=contents,
-            config=config,
-        )
+        used_model = model
+        try:
+            resp = client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=config,
+            )
+        except Exception as exc:
+            fallback = _google_fallback_model(model, exc)
+            if fallback is None:
+                raise
+            logger.warning(
+                "Gemini %s busy (HTTP %s); retrying with %s",
+                model,
+                getattr(exc, "code", "?"),
+                fallback,
+            )
+            used_model = fallback
+            resp = client.models.generate_content(
+                model=fallback,
+                contents=contents,
+                config=config,
+            )
+        # Gemini 2.5+ "thinks" before answering; with a small token budget the
+        # thinking can use it all, leaving no answer. Retry once with more room.
+        if _google_ran_out_of_tokens(resp) and max_tokens < 8192:
+            logger.warning(
+                "Gemini %s hit the token limit before answering; retrying",
+                used_model,
+            )
+            config.max_output_tokens = min(max_tokens * 4, 8192)
+            resp = client.models.generate_content(
+                model=used_model,
+                contents=contents,
+                config=config,
+            )
         elapsed = time.monotonic() - t0
 
         # Extract text and function_call parts from response
@@ -979,23 +980,30 @@ class CloudEngine(InferenceEngine):
         tool_calls: list[Dict[str, Any]] = []
         candidates = getattr(resp, "candidates", None)
         if candidates:
-            parts = getattr(candidates[0].content, "parts", [])
+            # ``content`` or ``content.parts`` can be None (e.g. when the token
+            # limit is hit before any output), so treat that as no parts.
+            parts = getattr(candidates[0].content, "parts", None) or []
             for part in parts:
                 if hasattr(part, "function_call") and part.function_call:
                     fc = part.function_call
                     fc_args = dict(fc.args) if hasattr(fc.args, "items") else {}
                     tc_dict: Dict[str, Any] = {
-                        "id": f"google_{fc.name}",
+                        "id": f"google_{uuid.uuid4().hex}",
                         "name": fc.name,
                         "arguments": json.dumps(fc_args),
                     }
-                    # Preserve thought_signature for Gemini reasoning models
+                    # The signature stays inside the engine: it is raw bytes,
+                    # which results, events and traces cannot serialize. It is
+                    # replayed by tool-call ID on the next turn.
                     sig = getattr(part, "thought_signature", None)
                     if sig is not None:
-                        tc_dict["thought_signature"] = sig
-                        self._thought_sigs[tc_dict["id"]] = sig
+                        self._remember_thought_signature(tc_dict["id"], sig)
                     tool_calls.append(tc_dict)
-                elif hasattr(part, "text") and part.text:
+                elif (
+                    hasattr(part, "text")
+                    and part.text
+                    and getattr(part, "thought", None) is not True
+                ):
                     text_parts.append(part.text)
 
         # Guard against resp.text ValueError when only function_call parts
@@ -1019,7 +1027,7 @@ class CloudEngine(InferenceEngine):
                 "total_tokens": prompt_tokens + completion_tokens,
             },
             "model": model,
-            "finish_reason": "stop",
+            "finish_reason": google_common.chunk_finish_reason(resp) or "stop",
             "cost_usd": estimate_cost(model, prompt_tokens, completion_tokens),
             "ttft": elapsed,
         }
@@ -1028,6 +1036,11 @@ class CloudEngine(InferenceEngine):
             result["tool_calls"] = tool_calls
 
         return result
+
+    def _remember_thought_signature(self, tool_call_id: str, signature: bytes) -> None:
+        self._thought_sigs[tool_call_id] = signature
+        while len(self._thought_sigs) > _MAX_THOUGHT_SIGNATURES:
+            self._thought_sigs.pop(next(iter(self._thought_sigs)), None)
 
     def _generate_openrouter(
         self,
@@ -1463,33 +1476,43 @@ class CloudEngine(InferenceEngine):
         **kwargs: Any,
     ) -> AsyncIterator[str]:
         if self._google_client is None:
-            raise EngineConnectionError("Google client not available")
-        system_text = ""
-        contents: List[Dict[str, Any]] = []
-        for m in messages:
-            if m.role.value == "system":
-                system_text = m.content
-            elif m.role.value == "assistant":
-                contents.append({"role": "model", "parts": [{"text": m.content}]})
-            else:
-                contents.append({"role": "user", "parts": [{"text": m.content}]})
-
-        from google.genai import types as genai_types
-
-        config = genai_types.GenerateContentConfig(
+            raise google_common.MissingAPIKeyError("Google client not available")
+        system_text, contents = google_common.build_contents(
+            messages, getattr(self, "_thought_sigs", None)
+        )
+        config = google_common.build_config(
             temperature=temperature,
             max_output_tokens=max_tokens,
+            system_instruction=system_text,
         )
-        if system_text:
-            config.system_instruction = system_text
 
-        for chunk in self._google_client.models.generate_content_stream(
-            model=model,
-            contents=contents,
-            config=config,
-        ):
+        async for chunk in self._open_google_stream(model, contents, config):
             if chunk.text:
                 yield chunk.text
+
+    def _google_async_client(self) -> Any:
+        """The Gemini client to use on the running event loop.
+
+        The SDK's async connections belong to the loop that opened them, so a
+        client this engine built is replaced when the loop changes (for example
+        one ``asyncio.run()`` per CLI turn).
+        """
+        loop = asyncio.get_running_loop()
+        owner = getattr(self, "_google_loop", None)
+        api_key = getattr(self, "_google_api_key", None)
+        if owner is not None and owner is not loop and api_key:
+            self._google_client = google_common.create_client(api_key)
+        self._google_loop = loop
+        return self._google_client
+
+    async def _open_google_stream(
+        self, model: str, contents: Any, config: Any
+    ) -> AsyncIterator[Any]:
+        """Iterate a Gemini stream, falling back to a lighter model if busy."""
+        # Held locally so the client outlives the stream if it is replaced.
+        client = self._google_async_client()
+        async for chunk in google_common.open_stream(client, model, contents, config):
+            yield chunk
 
     async def _stream_full_google(
         self,
@@ -1502,64 +1525,16 @@ class CloudEngine(InferenceEngine):
     ) -> AsyncIterator[StreamChunk]:
         """Stream Google text and function-call parts as full chunks."""
         if self._google_client is None:
-            raise EngineConnectionError("Google client not available")
+            raise google_common.MissingAPIKeyError("Google client not available")
 
-        system_text = ""
-        contents: List[Dict[str, Any]] = []
-        for message in messages:
-            if message.role.value == "system":
-                system_text = message.content
-            elif message.role.value == "tool":
-                function_response = {
-                    "function_response": {
-                        "name": message.name or "unknown",
-                        "response": {"result": message.content},
-                    }
-                }
-                if (
-                    contents
-                    and contents[-1]["role"] == "user"
-                    and contents[-1]["parts"]
-                    and "function_response" in contents[-1]["parts"][-1]
-                ):
-                    contents[-1]["parts"].append(function_response)
-                else:
-                    contents.append({"role": "user", "parts": [function_response]})
-            elif message.role.value == "assistant" and message.tool_calls:
-                parts: List[Dict[str, Any]] = []
-                if message.content:
-                    parts.append({"text": message.content})
-                for tool_call in message.tool_calls:
-                    args = tool_call.arguments
-                    if isinstance(args, str):
-                        try:
-                            args = json.loads(args)
-                        except (json.JSONDecodeError, TypeError):
-                            args = {"input": args}
-                    function_call_part: Dict[str, Any] = {
-                        "function_call": {
-                            "name": tool_call.name,
-                            "args": args if isinstance(args, dict) else {},
-                        }
-                    }
-                    signature = self._thought_sigs.get(tool_call.id)
-                    if signature is not None:
-                        function_call_part["thought_signature"] = signature
-                    parts.append(function_call_part)
-                contents.append({"role": "model", "parts": parts})
-            elif message.role.value == "assistant":
-                contents.append({"role": "model", "parts": [{"text": message.content}]})
-            else:
-                contents.append({"role": "user", "parts": [{"text": message.content}]})
-
-        from google.genai import types as genai_types
-
-        config = genai_types.GenerateContentConfig(
+        system_text, contents = google_common.build_contents(
+            messages, self._thought_sigs
+        )
+        config = google_common.build_config(
             temperature=temperature,
             max_output_tokens=max_tokens,
+            system_instruction=system_text,
         )
-        if system_text:
-            config.system_instruction = system_text
 
         tools = kwargs.pop("tools", None)
         if tools:
@@ -1568,22 +1543,10 @@ class CloudEngine(InferenceEngine):
         tool_call_count = 0
         stream_id = uuid.uuid4().hex
         final_usage: Dict[str, Any] | None = None
-        for chunk in self._google_client.models.generate_content_stream(
-            model=model,
-            contents=contents,
-            config=config,
-        ):
-            usage_metadata = getattr(chunk, "usage_metadata", None)
-            if usage_metadata is not None:
-                prompt_tokens = getattr(usage_metadata, "prompt_token_count", 0) or 0
-                completion_tokens = (
-                    getattr(usage_metadata, "candidates_token_count", 0) or 0
-                )
-                final_usage = {
-                    "prompt_tokens": prompt_tokens,
-                    "completion_tokens": completion_tokens,
-                    "total_tokens": prompt_tokens + completion_tokens,
-                }
+        final_reason = "stop"
+        async for chunk in self._open_google_stream(model, contents, config):
+            final_usage = google_common.usage_from(chunk) or final_usage
+            final_reason = google_common.chunk_finish_reason(chunk) or final_reason
 
             candidates = getattr(chunk, "candidates", None)
             parts = []
@@ -1595,7 +1558,7 @@ class CloudEngine(InferenceEngine):
                 calls: List[Dict[str, Any]] = []
                 for part in parts:
                     text = getattr(part, "text", None)
-                    if text:
+                    if text and getattr(part, "thought", None) is not True:
                         text_found = True
                         yield StreamChunk(content=text)
 
@@ -1627,7 +1590,7 @@ class CloudEngine(InferenceEngine):
                         signature = getattr(part, "thought_signature", None)
                         if signature is not None:
                             tool_call["thought_signature"] = signature
-                            self._thought_sigs[tool_id] = signature
+                            self._remember_thought_signature(tool_id, signature)
                 if calls:
                     yield StreamChunk(tool_calls=calls)
                 if text_found:
@@ -1641,7 +1604,7 @@ class CloudEngine(InferenceEngine):
                 yield StreamChunk(content=text)
 
         yield StreamChunk(
-            finish_reason="tool_calls" if tool_call_count else "stop",
+            finish_reason="tool_calls" if tool_call_count else final_reason,
             usage=final_usage,
         )
 

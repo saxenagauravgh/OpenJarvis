@@ -13,10 +13,11 @@ function applyTheme() {
   try {
     const raw = localStorage.getItem('openjarvis-settings');
     const settings = raw ? JSON.parse(raw) : {};
-    const theme = settings.theme || 'system';
-    if (theme === 'dark') {
+    const theme = settings.theme || 'hud';
+    if (theme === 'dark' || theme === 'hud') {
       document.documentElement.classList.add('dark');
       document.documentElement.classList.remove('light');
+      if (theme === 'hud') document.documentElement.classList.add('hud');
     } else if (theme === 'light') {
       document.documentElement.classList.add('light');
       document.documentElement.classList.remove('dark');
@@ -25,6 +26,13 @@ function applyTheme() {
 }
 
 applyTheme();
+
+// A file dropped outside a drop zone must not replace the app with the file.
+for (const type of ['dragover', 'drop']) {
+  window.addEventListener(type, (event) => {
+    if ((event as DragEvent).dataTransfer?.types.includes('Files')) event.preventDefault();
+  });
+}
 
 // Fetch the API base URL from the Tauri backend before rendering.
 // This ensures JARVIS_PORT is defined in one place (the Rust backend).

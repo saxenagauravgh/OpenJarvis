@@ -5,19 +5,27 @@ import rehypeKatex from 'rehype-katex';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import 'katex/dist/katex.min.css';
-import { Copy, Check } from 'lucide-react';
+import { Copy, Check, FileText, Image as ImageIcon } from 'lucide-react';
 import { AudioPlayer } from './AudioPlayer';
 import { ToolCallCard } from './ToolCallCard';
 import { ResearchTimeline } from './ResearchTimeline';
 import { rehypeCitations } from '../../lib/rehype-citations';
 import { XRayFooter } from './XRayFooter';
 import { SpeakMessageButton } from './SpeakMessageButton';
+import { MessageError, MessageNotices, MessageOutcome } from './MessageStatus';
+import { SettingActionCard } from './SettingActionCard';
 import type { ChatMessage } from '../../types';
-import { stripThinkTags } from '../../lib/message-text';
+import { useAppStore } from '../../lib/store';
+import { normalizeMathDelimiters, stripThinkTags } from '../../lib/message-text';
+import { formatFileSize } from '../../lib/chat/attachments';
 
 interface Props {
   message: ChatMessage;
   isLive?: boolean;
+  /** Offered on a failed reply that can be sent again. */
+  onRetry?: (messageId: string) => void;
+  /** Offered on a reply that was cut off at the length limit. */
+  onContinue?: () => void;
 }
 
 function getTextContent(node: any): string {
@@ -109,10 +117,14 @@ function CopyMessageButton({ content }: { content: string }) {
   );
 }
 
-export function MessageBubble({ message, isLive = false }: Props) {
+export function MessageBubble({ message, isLive = false, onRetry, onContinue }: Props) {
   const isUser = message.role === 'user';
+  const developerMode = useAppStore((s) => s.settings.developerMode);
 
-  const cleanContent = useMemo(() => stripThinkTags(message.content), [message.content]);
+  const cleanContent = useMemo(
+    () => normalizeMathDelimiters(stripThinkTags(message.content)),
+    [message.content],
+  );
 
   // Build a ref→source lookup once per render. Memoized so the rehype plugin
   // identity stays stable until the source list actually changes.
@@ -135,7 +147,7 @@ export function MessageBubble({ message, isLive = false }: Props) {
       <div className="flex justify-end mb-4">
         <div
           dir="auto"
-          className="max-w-[85%] px-4 py-2.5 text-sm leading-relaxed"
+          className="hud-user-bubble max-w-[85%] px-4 py-2.5 text-sm leading-relaxed"
           style={{
             background: 'var(--color-user-bubble)',
             color: 'var(--color-user-bubble-text)',
@@ -144,6 +156,32 @@ export function MessageBubble({ message, isLive = false }: Props) {
             wordBreak: 'break-word',
           }}
         >
+          {message.attachments && message.attachments.length > 0 && (
+            <div className="mb-1 text-xs opacity-80" style={{ whiteSpace: 'normal' }}>
+              {message.attachments.map((name, i) => (
+                <span key={`${name}-${i}`} className="mr-2">📎 {name}</span>
+              ))}
+            </div>
+          )}
+          {message.files && message.files.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 mb-1.5" style={{ whiteSpace: 'normal' }}>
+              {message.files.map((file) => {
+                const Icon = file.kind === 'image' ? ImageIcon : FileText;
+                return (
+                  <span
+                    key={file.id}
+                    className="inline-flex items-center gap-1.5 max-w-full rounded-md px-2 py-1 text-xs"
+                    style={{ border: '1px solid color-mix(in srgb, currentColor 30%, transparent)' }}
+                    title={file.name}
+                  >
+                    <Icon size={12} className="shrink-0" />
+                    <span className="truncate">{file.name}</span>
+                    <span className="shrink-0 opacity-70">{formatFileSize(file.size)}</span>
+                  </span>
+                );
+              })}
+            </div>
+          )}
           {message.content}
         </div>
       </div>
@@ -151,7 +189,7 @@ export function MessageBubble({ message, isLive = false }: Props) {
   }
 
   return (
-    <div className="group mb-6">
+    <div className="group mb-6" data-message-id={message.id}>
       {/* Deep Research timeline (steps + status) */}
       {(message.isResearch || (message.researchTraces && message.researchTraces.length > 0)) && (
         <ResearchTimeline
@@ -173,6 +211,8 @@ export function MessageBubble({ message, isLive = false }: Props) {
       {/* Audio player (e.g. morning digest) */}
       {message.audio?.url && <AudioPlayer src={message.audio.url} />}
 
+      <MessageNotices notices={message.notices} />
+
       {/* Assistant message */}
       {cleanContent && (
         <div className="prose max-w-none">
@@ -189,18 +229,31 @@ export function MessageBubble({ message, isLive = false }: Props) {
         </div>
       )}
 
+      {message.action && <SettingActionCard message={message} />}
+      {message.error && (
+        <MessageError
+          error={message.error}
+          onRetry={onRetry ? () => onRetry(message.id) : undefined}
+        />
+      )}
+      {!isLive && <MessageOutcome message={message} onContinue={onContinue} />}
+
       {/* Footer: copy + read aloud + x-ray */}
-      <div className="flex items-center gap-2 mt-1.5">
-        <CopyMessageButton content={cleanContent} />
-        {!isUser && !isLive && (
-          <SpeakMessageButton messageId={message.id} content={cleanContent} />
-        )}
-      </div>
-      <XRayFooter
-        usage={message.usage}
-        telemetry={message.telemetry}
-        isResearch={message.isResearch}
-      />
+      {cleanContent && (
+        <div className="flex items-center gap-2 mt-1.5">
+          <CopyMessageButton content={cleanContent} />
+          {!isLive && (
+            <SpeakMessageButton messageId={message.id} content={cleanContent} />
+          )}
+        </div>
+      )}
+      {developerMode && (
+        <XRayFooter
+          usage={message.usage}
+          telemetry={message.telemetry}
+          isResearch={message.isResearch}
+        />
+      )}
     </div>
   );
 }

@@ -2,20 +2,25 @@
 
 Reads API keys from the process environment, with a legacy
 ~/.openjarvis/cloud-keys.env fallback for non-desktop/manual setups. Uses
-httpx directly so no cloud SDK packages are required.
+httpx directly, except for Gemini, which goes through the shared SDK path in
+``openjarvis.engine.google_common``.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Any, Sequence
 
 import httpx
 
 from openjarvis.core.paths import get_config_dir
 from openjarvis.core.types import Message
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Key / provider detection
@@ -43,20 +48,10 @@ _LOCAL_HF_ORGS = (
 
 def _load_keys() -> dict[str, str]:
     """Read available cloud keys every call so live updates are picked up."""
-    keys: dict[str, str] = {}
+    from openjarvis.engine.google_common import read_env_file
+
     # File first, then fall back to process environment
-    if _CLOUD_ENV_FILE.exists():
-        for raw in _CLOUD_ENV_FILE.read_text(encoding="utf-8").splitlines():
-            line = raw.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                val = v.strip()
-                if (val.startswith('"') and val.endswith('"')) or (
-                    val.startswith("'") and val.endswith("'")
-                ):
-                    if len(val) >= 2:
-                        val = val[1:-1]
-                keys[k.strip()] = val
+    keys: dict[str, str] = read_env_file(_CLOUD_ENV_FILE)
     # Process env can override (e.g. during testing)
     for name in (
         "OPENAI_API_KEY",
@@ -71,6 +66,12 @@ def _load_keys() -> dict[str, str]:
         if val:
             keys[name] = val
     return keys
+
+
+def _missing_key(name: str) -> ValueError:
+    from openjarvis.engine.google_common import MissingAPIKeyError
+
+    return MissingAPIKeyError(f"{name} not set — add it in the Cloud Models tab")
 
 
 def get_provider(model: str) -> str | None:
@@ -142,23 +143,6 @@ def _to_anthropic_msgs(
     return system_text, chat
 
 
-def _to_google_contents(messages: Sequence[Message]) -> list[dict[str, Any]]:
-    """Convert to Google Gemini content format."""
-    contents = []
-    for m in messages:
-        role = m.role.value if hasattr(m.role, "value") else str(m.role)
-        if role == "system":
-            # Gemini doesn't have a system role in the contents array;
-            # prepend as a user message.
-            contents.append({"role": "user", "parts": [{"text": m.content or ""}]})
-            contents.append({"role": "model", "parts": [{"text": "Understood."}]})
-        elif role == "assistant":
-            contents.append({"role": "model", "parts": [{"text": m.content or ""}]})
-        else:
-            contents.append({"role": "user", "parts": [{"text": m.content or ""}]})
-    return contents
-
-
 # ---------------------------------------------------------------------------
 # Streaming generators
 # ---------------------------------------------------------------------------
@@ -175,7 +159,7 @@ async def _stream_openai(
     keys = _load_keys()
     api_key = keys.get(api_key_name, "")
     if not api_key:
-        raise ValueError(f"{api_key_name} not set — add it in the Cloud Models tab")
+        raise _missing_key(api_key_name)
 
     payload = {
         "model": model,
@@ -220,7 +204,7 @@ async def _stream_anthropic(
     keys = _load_keys()
     api_key = keys.get("ANTHROPIC_API_KEY", "")
     if not api_key:
-        raise ValueError("ANTHROPIC_API_KEY not set — add it in the Cloud Models tab")
+        raise _missing_key("ANTHROPIC_API_KEY")
 
     system_text, chat_msgs = _to_anthropic_msgs(messages)
     payload: dict[str, Any] = {
@@ -265,45 +249,17 @@ async def _stream_google(
     temperature: float,
     max_tokens: int,
 ) -> AsyncIterator[str]:
-    keys = _load_keys()
-    api_key = keys.get("GEMINI_API_KEY") or keys.get("GOOGLE_API_KEY", "")
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY not set — add it in the Cloud Models tab")
+    from openjarvis.engine import google_common
 
-    contents = _to_google_contents(messages)
-    payload: dict[str, Any] = {
-        "contents": contents,
-        "generationConfig": {
-            "temperature": temperature,
-            "maxOutputTokens": max_tokens,
-        },
-    }
-
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{model}:streamGenerateContent?alt=sse&key={api_key}"
-    )
-
-    async with httpx.AsyncClient(timeout=180) as client:
-        async with client.stream("POST", url, json=payload) as resp:
-            resp.raise_for_status()
-            async for line in resp.aiter_lines():
-                if not line.startswith("data: "):
-                    continue
-                data = line[6:].strip()
-                try:
-                    chunk = json.loads(data)
-                    parts = (
-                        chunk.get("candidates", [{}])[0]
-                        .get("content", {})
-                        .get("parts", [])
-                    )
-                    for part in parts:
-                        text = part.get("text", "")
-                        if text:
-                            yield text
-                except Exception:
-                    pass
+    async for event in google_common.stream_text(
+        model,
+        messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        idle_timeout=180,
+    ):
+        if event.text:
+            yield event.text
 
 
 # ---------------------------------------------------------------------------
@@ -315,24 +271,47 @@ def _ollama_host() -> str:
     return os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
 
 
-async def stream_local(
+@dataclass(frozen=True)
+class LocalEvent:
+    """A token from Ollama, or the final finish reason and usage."""
+
+    text: str = ""
+    finish_reason: str | None = None
+    usage: dict[str, int] | None = None
+
+
+async def stream_local_events(
     model: str,
     messages: Sequence[Message],
     temperature: float = 0.7,
     max_tokens: int = 1024,
-) -> AsyncIterator[str]:
-    """Stream tokens directly from Ollama, bypassing the engine system."""
+    *,
+    num_ctx: int | None = None,
+    include_images: bool = False,
+) -> AsyncIterator[LocalEvent]:
+    """Stream from Ollama, ending with a finish reason (``stop`` or ``length``).
+
+    Raises when Ollama reports an error or the stream ends before it is done.
+    """
+    chat = _to_openai_msgs(messages)
+    if include_images:
+        for entry, message in zip(chat, messages):
+            if message.images:
+                entry["images"] = list(message.images)
+    options: dict[str, Any] = {
+        "temperature": temperature,
+        "num_predict": max_tokens,
+    }
+    if num_ctx is not None:
+        options["num_ctx"] = num_ctx
     payload = {
         "model": model,
-        "messages": _to_openai_msgs(messages),
+        "messages": chat,
         "stream": True,
         # Disable extended thinking (Qwen3.5 etc.) — when enabled all tokens
         # go into the 'thinking' field and 'content' stays empty.
         "think": False,
-        "options": {
-            "temperature": temperature,
-            "num_predict": max_tokens,
-        },
+        "options": options,
     }
     host = _ollama_host()
     async with httpx.AsyncClient(timeout=300) as client:
@@ -344,12 +323,53 @@ async def stream_local(
                 try:
                     data = json.loads(line)
                     token = data.get("message", {}).get("content", "")
-                    if token:
-                        yield token
-                    if data.get("done"):
-                        break
-                except Exception:
-                    pass
+                except (ValueError, AttributeError):
+                    continue
+                if data.get("error"):
+                    raise RuntimeError(f"Ollama error: {data['error']}")
+                if token:
+                    yield LocalEvent(text=token)
+                if data.get("done"):
+                    prompt = data.get("prompt_eval_count") or 0
+                    completion = data.get("eval_count") or 0
+                    yield LocalEvent(
+                        finish_reason=(
+                            "length" if data.get("done_reason") == "length" else "stop"
+                        ),
+                        usage={
+                            "prompt_tokens": prompt,
+                            "completion_tokens": completion,
+                            "total_tokens": prompt + completion,
+                        },
+                    )
+                    return
+    raise ConnectionError("Ollama stream ended before the reply was complete")
+
+
+async def stream_local(
+    model: str,
+    messages: Sequence[Message],
+    temperature: float = 0.7,
+    max_tokens: int = 1024,
+) -> AsyncIterator[str]:
+    """Stream tokens directly from Ollama, bypassing the engine system."""
+    async for event in stream_local_events(model, messages, temperature, max_tokens):
+        if event.text:
+            yield event.text
+
+
+async def local_model_supports_images(model: str) -> bool:
+    """Whether Ollama reports that *model* can see images (False if unknown)."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                f"{_ollama_host()}/api/show", json={"model": model}
+            )
+            resp.raise_for_status()
+            return "vision" in (resp.json().get("capabilities") or [])
+    except Exception:
+        logger.debug("Could not read capabilities of local model %s", model)
+        return False
 
 
 async def list_local_models() -> list[str]:
@@ -395,9 +415,7 @@ async def stream_cloud(
         keys = _load_keys()
         api_key = keys.get("OPENROUTER_API_KEY", "")
         if not api_key:
-            raise ValueError(
-                "OPENROUTER_API_KEY not set — add it in the Cloud Models tab"
-            )
+            raise _missing_key("OPENROUTER_API_KEY")
         async for token in _stream_openai(
             _openrouter_model_id(model),
             messages,
@@ -412,9 +430,7 @@ async def stream_cloud(
         keys = _load_keys()
         api_key = keys.get("ATLASCLOUD_API_KEY", "")
         if not api_key:
-            raise ValueError(
-                "ATLASCLOUD_API_KEY not set — add it in the Cloud Models tab"
-            )
+            raise _missing_key("ATLASCLOUD_API_KEY")
         async for token in _stream_openai(
             model.removeprefix(_ATLASCLOUD_PREFIX),
             messages,
@@ -429,7 +445,7 @@ async def stream_cloud(
         keys = _load_keys()
         api_key = keys.get("MINIMAX_API_KEY", "")
         if not api_key:
-            raise ValueError("MINIMAX_API_KEY not set — add it in the Cloud Models tab")
+            raise _missing_key("MINIMAX_API_KEY")
         async for token in _stream_openai(
             model,
             messages,

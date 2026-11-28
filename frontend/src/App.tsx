@@ -12,11 +12,10 @@ import { CommandPalette } from './components/CommandPalette';
 import { SetupScreen } from './components/SetupScreen';
 import { Toaster } from './components/ui/sonner';
 import { useAppStore } from './lib/store';
-import { fetchModels, fetchServerInfo, fetchSavings, submitSavings, isTauri } from './lib/api';
-import { OptInModal } from './components/OptInModal';
-import { UpdateChecker } from './components/Desktop/UpdateChecker';
+import { fetchModels, fetchServerInfo, fetchSavings, isTauri } from './lib/api';
+import { AgeGate } from './components/AgeGate';
+import { setSpeechSpeed } from './lib/tts';
 import { track, hashId } from './lib/analytics';
-import { offerAnalyticsChoice } from './lib/analytics-invitation';
 
 export default function App() {
   const [setupDone, setSetupDone] = useState(!isTauri());
@@ -38,23 +37,28 @@ export default function App() {
   const settings = useAppStore((s) => s.settings);
   const commandPaletteOpen = useAppStore((s) => s.commandPaletteOpen);
   const setCommandPaletteOpen = useAppStore((s) => s.setCommandPaletteOpen);
-  const optInEnabled = useAppStore((s) => s.optInEnabled);
-  const optInDisplayName = useAppStore((s) => s.optInDisplayName);
-  const optInEmail = useAppStore((s) => s.optInEmail);
-  const optInAnonId = useAppStore((s) => s.optInAnonId);
-  const optInModalSeen = useAppStore((s) => s.optInModalSeen);
-  const optInModalOpen = useAppStore((s) => s.optInModalOpen);
-  const setOptInModalOpen = useAppStore((s) => s.setOptInModalOpen);
-  const markOptInModalSeen = useAppStore((s) => s.markOptInModalSeen);
-  const savings = useAppStore((s) => s.savings);
+  const adultConfirmed = useAppStore((s) => s.adultConfirmed);
+  const confirmAdult = useAppStore((s) => s.confirmAdult);
 
   // Apply theme class to <html>
   useEffect(() => {
     const root = document.documentElement;
-    root.classList.remove('dark', 'light');
+    root.classList.remove('dark', 'light', 'hud');
     if (settings.theme === 'dark') root.classList.add('dark');
     else if (settings.theme === 'light') root.classList.add('light');
+    // HUD is a dark theme with extra styling layered on top.
+    else if (settings.theme === 'hud') root.classList.add('dark', 'hud');
   }, [settings.theme]);
+
+  // Text size scales the whole interface (sizes are in rem).
+  useEffect(() => {
+    const sizes = { small: '14px', default: '', large: '18px' };
+    document.documentElement.style.fontSize = sizes[settings.fontSize] ?? '';
+  }, [settings.fontSize]);
+
+  useEffect(() => {
+    setSpeechSpeed(settings.voiceSpeed);
+  }, [settings.voiceSpeed]);
 
   // Sync overlay conversations into the main app
   const importOverlay = useAppStore((s) => s.importOverlayConversation);
@@ -89,51 +93,16 @@ export default function App() {
     fetchServerInfo().then(setServerInfo).catch(() => {});
   }, [setupDone, setServerInfo]);
 
-  // Poll savings and optionally share to Supabase
+  // Poll savings
   useEffect(() => {
     const refresh = () =>
       fetchSavings()
-        .then((data) => {
-          setSavings(data);
-          if (optInEnabled && optInDisplayName && data) {
-            const claudeEntry = data.per_provider.find(
-              (p) => p.provider === 'claude-fable-5',
-            );
-            const dollarSavings = claudeEntry ? claudeEntry.total_cost : 0;
-            const energySaved = data.per_provider.reduce(
-              (sum, p) => sum + (p.energy_wh || 0),
-              0,
-            );
-            const flopsSaved = data.per_provider.reduce(
-              (sum, p) => sum + (p.flops || 0),
-              0,
-            );
-            submitSavings({
-              anon_id: optInAnonId,
-              display_name: optInDisplayName,
-              email: optInEmail,
-              total_calls: data.total_calls,
-              total_tokens: data.total_tokens,
-              dollar_savings: dollarSavings,
-              energy_wh_saved: energySaved,
-              flops_saved: flopsSaved,
-              token_counting_version: data.token_counting_version ?? 1,
-            });
-          }
-        })
+        .then(setSavings)
         .catch(() => {});
     refresh();
     const interval = setInterval(refresh, 30000);
     return () => clearInterval(interval);
-  }, [optInEnabled, optInDisplayName, optInEmail, optInAnonId]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Wait for desktop setup before fetching identity or marking the dialog seen.
-  useEffect(() => offerAnalyticsChoice({
-    ready: setupDone,
-    sharingModalSeen: optInModalSeen,
-    open: () => setOptInModalOpen(true),
-    markSharingModalSeen: markOptInModalSeen,
-  }), [setupDone, optInModalSeen, setOptInModalOpen, markOptInModalSeen]);
+  }, [setSavings]);
 
   // Fire model_changed when the user switches models. First mount is
   // not a "change" — only emit when both prev and current are real and
@@ -184,13 +153,17 @@ export default function App() {
   }, [commandPaletteOpen, setCommandPaletteOpen, toggleSystemPanel]);
 
 
+  // Nothing else is shown until the user confirms they are an adult.
+  if (!adultConfirmed) {
+    return <AgeGate onConfirm={confirmAdult} />;
+  }
+
   if (!setupDone) {
     return <SetupScreen onReady={handleSetupReady} />;
   }
 
   return (
     <>
-      <UpdateChecker />
       <Routes>
         <Route element={<Layout />}>
           <Route index element={<ChatPage />} />
@@ -204,9 +177,6 @@ export default function App() {
       </Routes>
       <Toaster position="bottom-right" />
       {commandPaletteOpen && <CommandPalette />}
-      {optInModalOpen && (
-        <OptInModal onClose={() => setOptInModalOpen(false)} />
-      )}
     </>
   );
 }

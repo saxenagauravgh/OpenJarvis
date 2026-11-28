@@ -110,6 +110,7 @@ describe('shared voice output', () => {
     synth.mockResolvedValueOnce(new Blob(['wav']));
 
     const firstCall = useTtsStore.getState().speak('m1', 'Erste');
+    await vi.waitFor(() => expect(synth).toHaveBeenCalled());
     const signal = synth.mock.calls[0][1]?.signal as AbortSignal;
     expect(signal.aborted).toBe(false);
 
@@ -146,8 +147,8 @@ describe('shared voice output', () => {
     // Clearing src fires a media error; the handler must already be detached.
     el.onerror?.();
 
+    await vi.waitFor(() => expect(useTtsStore.getState().state).toBe('idle'));
     expect(useTtsStore.getState().error).toBeNull();
-    expect(useTtsStore.getState().state).toBe('idle');
     expect(revoked).toEqual(created);
   });
 
@@ -250,5 +251,17 @@ describe('autoplay gating', () => {
     expect(
       shouldAutoplayFinishedReply('chat-1', 'chat-2', true, { role: 'assistant', id: 'old' }, null),
     ).toBe(false);
+  });
+});
+
+describe('splitForSpeech', () => {
+  it('keeps short text whole and starts long text with a short piece', async () => {
+    const { splitForSpeech } = await import('./tts');
+    expect(splitForSpeech('Hello there. How are you?')).toEqual(['Hello there. How are you?']);
+    const long = Array.from({ length: 80 }, (_, i) => `This is sentence number ${i}.`).join(' ');
+    const chunks = splitForSpeech(long);
+    expect(chunks[0].length).toBeLessThanOrEqual(240);
+    expect(Math.max(...chunks.map((c) => c.length))).toBeLessThanOrEqual(1200);
+    expect(chunks.join(' ')).toBe(long);
   });
 });

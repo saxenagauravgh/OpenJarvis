@@ -6,11 +6,32 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # ---------------------------------------------------------------------------
 # Request models
 # ---------------------------------------------------------------------------
+
+
+def _split_content_parts(parts: List[Any]) -> tuple[str, List[str]]:
+    """Split OpenAI-style content parts into (text, base64 images).
+
+    Only inline ``data:`` image URLs are accepted; remote ``http(s)`` image
+    URLs are ignored so the server never fetches arbitrary URLs.
+    """
+    texts: List[str] = []
+    images: List[str] = []
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") == "text":
+            texts.append(str(part.get("text") or ""))
+        elif part.get("type") == "image_url":
+            image_url = part.get("image_url")
+            url = image_url.get("url", "") if isinstance(image_url, dict) else ""
+            if isinstance(url, str) and url.startswith("data:image/") and "," in url:
+                images.append(url.split(",", 1)[1])
+    return "\n".join(t for t in texts if t), images
 
 
 class ChatMessage(BaseModel):
@@ -19,6 +40,20 @@ class ChatMessage(BaseModel):
     name: Optional[str] = None
     tool_calls: Optional[List[Dict[str, Any]]] = None
     tool_call_id: Optional[str] = None
+    # Base64 image data (no ``data:`` prefix) for vision-capable models.
+    # Populated from OpenAI-style ``image_url`` content parts.
+    images: Optional[List[str]] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_content_parts(cls, data: Any) -> Any:
+        """Accept OpenAI multimodal content (a list of parts) as well as str."""
+        if isinstance(data, dict) and isinstance(data.get("content"), list):
+            text, images = _split_content_parts(data["content"])
+            data = {**data, "content": text}
+            if images:
+                data["images"] = list(data.get("images") or []) + images
+        return data
 
 
 class ChatCompletionRequest(BaseModel):

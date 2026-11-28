@@ -24,8 +24,10 @@ from openjarvis.server.comparison import comparison_router
 from openjarvis.server.connectors_router import create_connectors_router
 from openjarvis.server.dashboard import dashboard_router
 from openjarvis.server.digest_routes import create_digest_router
+from openjarvis.server.origin import DEFAULT_ALLOWED_ORIGINS
 from openjarvis.server.research_router import router as research_router
 from openjarvis.server.routes import router
+from openjarvis.server.tutor_routes import router as tutor_router
 from openjarvis.server.upload_router import router as upload_router
 
 logger = logging.getLogger(__name__)
@@ -265,24 +267,13 @@ def create_app(
     elif _env_origins:
         _origins = [o.strip() for o in _env_origins.split(",") if o.strip()]
     else:
-        _origins = [
-            "http://localhost:5173",
-            "http://127.0.0.1:5173",
-            "http://localhost:5174",
-            "http://127.0.0.1:5174",
-            # Tauri 2 production webview origins:
-            #   macOS / Linux / iOS  -> tauri://localhost
-            #   Windows / Android    -> http://tauri.localhost (default),
-            #                           https://tauri.localhost when
-            #                           windows.useHttpsScheme is enabled
-            "tauri://localhost",
-            "http://tauri.localhost",
-            "https://tauri.localhost",
-        ]
+        _origins = list(DEFAULT_ALLOWED_ORIGINS)
     # Defense in depth: a literal "*" with credentials is unsafe. Refuse it.
     _origins = [o for o in _origins if o != "*"]
     # Store dependencies in app state
     app.state.engine = engine
+    # Read by ``server/origin.py`` to reject untrusted browser origins.
+    app.state.cors_origins = _origins
     app.state.model = model
     app.state.agent = agent
     app.state.bus = bus
@@ -475,6 +466,7 @@ def create_app(
                     pass
 
     app.include_router(router)
+    app.include_router(tutor_router)
     app.include_router(dashboard_router)
     app.include_router(comparison_router)
     app.include_router(create_connectors_router())

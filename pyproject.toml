@@ -116,6 +116,8 @@ desktop = [
     "soundfile>=0.12",
     # PDF text extraction for document uploads (server/upload_router.py).
     "pdfplumber>=0.10",
+    # Word documents: uploads and tutor attachments (server/attachments.py).
+    "python-docx>=1.1",
 ]
 # Local neural TTS. Kokoro pulls spacy/misaki for G2P; espeak-ng must also be
 # present on PATH (brew install espeak-ng) for out-of-dictionary words.

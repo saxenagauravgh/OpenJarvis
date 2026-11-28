@@ -17,3 +17,13 @@ describe('isEmbedOnlyModel', () => {
     expect(isEmbedOnlyModel(modelId)).toBe(false);
   });
 });
+
+describe('isCloudModel', () => {
+  it('recognises cloud ids and leaves local ones alone', async () => {
+    const { isCloudModel } = await import('./model-capabilities');
+    expect(isCloudModel('gemini-2.5-flash')).toBe(true);
+    expect(isCloudModel('claude-sonnet-4-6')).toBe(true);
+    expect(isCloudModel('qwen2.5:3b')).toBe(false);
+    expect(isCloudModel('gpt-oss:20b')).toBe(false);
+  });
+});

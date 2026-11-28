@@ -15,7 +15,14 @@ for _mod in ("faster_whisper", "openai_whisper", "deepgram"):
         logger.debug("Optional STT backend %s not loaded: %s", _mod, _exc)
 
 # Optional TTS backends — each registers itself via @TTSRegistry.register()
-for _mod in ("cartesia_tts", "elevenlabs_tts", "kokoro_tts", "openai_tts"):
+for _mod in (
+    "cartesia_tts",
+    "elevenlabs_tts",
+    "gemini_tts",
+    "kokoro_tts",
+    "macos_say",
+    "openai_tts",
+):
     try:
         importlib.import_module(f".{_mod}", __name__)
     except ImportError as _exc:

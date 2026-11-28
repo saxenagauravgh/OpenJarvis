@@ -32,6 +32,36 @@ from openjarvis.server.models import (
 
 router = APIRouter()
 
+_OLLAMA_UNREACHABLE = "Ollama is unreachable. Make sure it is running."
+
+
+def _failure_message(label: str, exc: Exception) -> str:
+    """Log the real error (without keys) and return words safe to show."""
+    from openjarvis.engine.google_common import classify_error, log_failure
+
+    log_failure(logging.getLogger("openjarvis.server"), label, exc)
+    return classify_error(exc).message
+
+
+def _without_bytes(value: Any) -> Any:
+    """Drop binary values such as Gemini thought signatures from wire data.
+
+    The engine keeps its own copy for replay, keyed by tool-call ID.
+    """
+    if isinstance(value, dict):
+        return {
+            key: _without_bytes(item)
+            for key, item in value.items()
+            if key != "thought_signature" and not isinstance(item, (bytes, bytearray))
+        }
+    if isinstance(value, list):
+        return [
+            _without_bytes(item)
+            for item in value
+            if not isinstance(item, (bytes, bytearray))
+        ]
+    return value
+
 
 def _to_messages(chat_messages) -> list[Message]:
     """Convert Pydantic ChatMessage objects to core Message objects."""
@@ -53,6 +83,7 @@ def _to_messages(chat_messages) -> list[Message]:
                 ]
                 or None,
                 tool_call_id=m.tool_call_id,
+                images=list(m.images) if getattr(m, "images", None) else None,
             )
         )
     return messages
@@ -161,9 +192,13 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
     engine = request.app.state.engine
     agent = getattr(request.app.state, "agent", None)
     model = request_body.model
+    # Agent tool loops only forward message text, so a request carrying images
+    # goes straight to the (vision-capable) model instead of the server agent.
+    has_images = any(getattr(m, "images", None) for m in request_body.messages)
     use_server_agent = (
         agent is not None
         and not request_body.tools
+        and not has_images
         and (not request_body.stream or bool(getattr(agent, "_tools", None)))
     )
 
@@ -232,6 +267,7 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
                             ]
                             or None,
                             tool_call_id=getattr(msg, "tool_call_id", None),
+                            images=getattr(msg, "images", None),
                         )
                     )
                 request_body.messages = new_msgs
@@ -776,18 +812,14 @@ async def _handle_agent_stream(
                 bus=bus,
             )
         except Exception as exc:
-            logging.getLogger("openjarvis.server").error(
-                "Agent stream error: %s",
-                exc,
-                exc_info=True,
-            )
+            message = _failure_message("Agent stream error", exc)
             error_chunk = ChatCompletionChunk(
                 id=chunk_id,
                 model=model,
                 choices=[
                     StreamChoice(
                         delta=DeltaMessage(
-                            content=f"Sorry, an error occurred: {exc}",
+                            content=f"Sorry, an error occurred. {message}",
                         ),
                         finish_reason="stop",
                     )
@@ -913,27 +945,25 @@ async def _handle_stream_tools(
                         id=chunk_id,
                         model=model,
                         choices=[
-                            StreamChoice(delta=DeltaMessage(tool_calls=sc.tool_calls))
+                            StreamChoice(
+                                delta=DeltaMessage(
+                                    tool_calls=_without_bytes(sc.tool_calls)
+                                )
+                            )
                         ],
                     )
                     yield f"data: {tc_chunk.model_dump_json()}\n\n"
                 if sc.finish_reason:
                     finish_reason = sc.finish_reason
         except Exception as exc:
-            import logging
-
-            logging.getLogger("openjarvis.server").error(
-                "Tool stream error: %s",
-                exc,
-                exc_info=True,
-            )
+            message = _failure_message("Tool stream error", exc)
             error_chunk = ChatCompletionChunk(
                 id=chunk_id,
                 model=model,
                 choices=[
                     StreamChoice(
                         delta=DeltaMessage(
-                            content=f"\n\nError during generation: {exc}",
+                            content=f"\n\n{message}",
                         ),
                         finish_reason="stop",
                     )
@@ -1088,20 +1118,14 @@ async def _handle_stream(
         except Exception as exc:
             # Surface errors as a content chunk so the frontend can
             # display them instead of silently failing.
-            import logging
-
-            logging.getLogger("openjarvis.server").error(
-                "Stream error: %s",
-                exc,
-                exc_info=True,
-            )
+            message = _failure_message("Stream error", exc)
             error_chunk = ChatCompletionChunk(
                 id=chunk_id,
                 model=model,
                 choices=[
                     StreamChoice(
                         delta=DeltaMessage(
-                            content=f"\n\nError during generation: {exc}",
+                            content=f"\n\n{message}",
                         ),
                         finish_reason="stop",
                     )
@@ -1252,7 +1276,8 @@ async def pull_model(request: Request):
             )
         resp.raise_for_status()
     except (_httpx.ConnectError, _httpx.TimeoutException) as exc:
-        raise HTTPException(status_code=502, detail=f"Ollama unreachable: {exc}")
+        _failure_message("Ollama model pull failed", exc)
+        raise HTTPException(status_code=502, detail=_OLLAMA_UNREACHABLE)
     except _httpx.HTTPStatusError as exc:
         raise HTTPException(
             status_code=exc.response.status_code,
@@ -1282,7 +1307,8 @@ async def delete_model(model_name: str, request: Request):
             )
         resp.raise_for_status()
     except (_httpx.ConnectError, _httpx.TimeoutException) as exc:
-        raise HTTPException(status_code=502, detail=f"Ollama unreachable: {exc}")
+        _failure_message("Ollama model delete failed", exc)
+        raise HTTPException(status_code=502, detail=_OLLAMA_UNREACHABLE)
     except _httpx.HTTPStatusError as exc:
         raise HTTPException(
             status_code=exc.response.status_code,
@@ -1348,7 +1374,10 @@ async def reload_cloud_engine(request: Request):
                 "message": "No cloud models available (check API keys)",
             }
     except Exception as exc:
-        return {"status": "error", "message": str(exc)}
+        return {
+            "status": "error",
+            "message": _failure_message("Cloud engine reload failed", exc),
+        }
 
     # Locate the innermost engine, working through InstrumentedEngine layers.
     outer = request.app.state.engine

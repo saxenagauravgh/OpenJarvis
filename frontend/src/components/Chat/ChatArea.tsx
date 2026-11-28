@@ -6,6 +6,9 @@ import { StreamingDots } from './StreamingDots';
 import { useAppStore } from '../../lib/store';
 import { shouldAutoplayFinishedReply, useTtsStore } from '../../lib/tts';
 import { stripThinkTags } from '../../lib/message-text';
+import { isSpeakableReply } from '../../lib/chat/history';
+import { continueTutorMessage, retryTutorMessage } from '../../lib/chat/sendTutorMessage';
+import { toast } from 'sonner';
 import { Sparkles, PanelRightOpen, PanelRightClose, Database, MessageSquare, X } from 'lucide-react';
 import { listConnectors } from '../../lib/connectors-api';
 
@@ -21,6 +24,7 @@ export function ChatArea() {
   const messages = useAppStore((s) => s.messages);
   const streamState = useAppStore((s) => s.streamState);
   const systemPanelOpen = useAppStore((s) => s.systemPanelOpen);
+  const developerMode = useAppStore((s) => s.settings.developerMode);
   const toggleSystemPanel = useAppStore((s) => s.toggleSystemPanel);
   const navigate = useNavigate();
   const listRef = useRef<HTMLDivElement>(null);
@@ -34,14 +38,17 @@ export function ChatArea() {
   // autoSpokenId fences the message so re-renders cannot repeat it.
   const voiceOutputEnabled = useAppStore((s) => s.settings.voiceOutputEnabled);
   const voiceAutoplay = useAppStore((s) => s.settings.voiceAutoplay);
+  // Conversation mode always speaks replies, whatever the autoplay settings.
+  const conversationMode = useAppStore((s) => s.conversationMode);
+  const speakReplies = (voiceOutputEnabled && voiceAutoplay) || conversationMode;
   // Probe the backend as soon as voice output is switched on. Without this the
   // first reply could never autoplay: `available` is only set by ensureHealth,
   // which until now ran solely from the per-message read-aloud button -- and
   // that button does not exist until a reply is already on screen.
   useEffect(() => {
-    if (!voiceOutputEnabled) return;
+    if (!voiceOutputEnabled && !conversationMode) return;
     useTtsStore.getState().ensureHealth();
-  }, [voiceOutputEnabled]);
+  }, [voiceOutputEnabled, conversationMode]);
 
   // Speak on the falling edge of a stream -- the moment a reply finishes -- and
   // never merely because a finished reply happens to be on screen. Opening the
@@ -49,6 +56,40 @@ export function ChatArea() {
   // and browsers block that anyway: playback with no preceding user gesture is
   // rejected outright, so the failure would be silent in both senses.
   const streamingConversationRef = useRef<string | null>(null);
+  // Start speaking as soon as the answer begins to arrive, not when it ends.
+  const liveSpeechRef = useRef<{
+    id: string;
+    update: (content: string) => void;
+    end: (content?: string) => void;
+  } | null>(null);
+  const ttsAvailableNow = useTtsStore((s) => s.available);
+  useEffect(() => {
+    const last = messages[messages.length - 1];
+    const live = liveSpeechRef.current;
+    if (live && (!isCurrentChatStreaming || last?.id !== live.id)) {
+      // The reply is complete (or was left behind): speak what remains.
+      const finished = messages.find((m) => m.id === live.id);
+      live.end(finished ? stripThinkTags(finished.content) : undefined);
+      liveSpeechRef.current = null;
+    }
+    if (!speakReplies || !isCurrentChatStreaming || !streamState.content) return;
+    if (!last || last.role !== 'assistant') return;
+    const content = stripThinkTags(streamState.content);
+    if (liveSpeechRef.current) {
+      liveSpeechRef.current.update(content);
+      return;
+    }
+    const tts = useTtsStore.getState();
+    if (ttsAvailableNow !== true) {
+      void tts.ensureHealth();
+      return;
+    }
+    if (tts.autoSpokenId === last.id) return;
+    tts.markAutoSpoken(last.id);
+    liveSpeechRef.current = { id: last.id, ...tts.speakLive(last.id) };
+    liveSpeechRef.current.update(content);
+  }, [messages, streamState.content, isCurrentChatStreaming, speakReplies, ttsAvailableNow]);
+
   useEffect(() => {
     const last = messages[messages.length - 1];
     const tts = useTtsStore.getState();
@@ -62,7 +103,7 @@ export function ChatArea() {
     streamingConversationRef.current = isCurrentChatStreaming ? activeId : null;
 
     if (!justFinished) return;
-    if (!voiceOutputEnabled || !voiceAutoplay) return;
+    if (!speakReplies) return;
 
     if (!last || last.role !== 'assistant' || activeId === null) return;
 
@@ -75,16 +116,20 @@ export function ChatArea() {
       const currentTts = useTtsStore.getState();
       const currentLast = app.messages[app.messages.length - 1];
       if (app.activeId !== completedConversationId || app.streamState.isStreaming) return;
-      if (!app.settings.voiceOutputEnabled || !app.settings.voiceAutoplay) return;
+      const stillSpeaking =
+        (app.settings.voiceOutputEnabled && app.settings.voiceAutoplay) || app.conversationMode;
+      if (!stillSpeaking) return;
       if (currentLast?.id !== completedMessageId || currentTts.available !== true) return;
       if (currentTts.autoSpokenId === completedMessageId) return;
+      // Failed, blocked and empty replies are never read out as answers.
+      // Nor is a reply the user interrupted.
+      if (!isSpeakableReply(currentLast) || currentLast.stopped) return;
 
       const text = stripThinkTags(currentLast.content);
-      if (!text) return;
       currentTts.markAutoSpoken(completedMessageId);
       void currentTts.speak(completedMessageId, text);
     });
-  }, [activeId, messages, streamState.isStreaming, isCurrentChatStreaming, voiceOutputEnabled, voiceAutoplay]);
+  }, [activeId, messages, streamState.isStreaming, isCurrentChatStreaming, speakReplies]);
   const currentStreamContent = isCurrentChatStreaming ? streamState.content : '';
 
   // Check if any data sources are connected
@@ -128,6 +173,31 @@ export function ChatArea() {
     }
   };
 
+  const handleRetry = useCallback(async (messageId: string) => {
+    const { activeId: conversationId, selectedModel } = useAppStore.getState();
+    if (!conversationId) return;
+    if (!selectedModel) {
+      toast.error('Pick a model first (⌘K)');
+      return;
+    }
+    const result = await retryTutorMessage(conversationId, messageId, selectedModel);
+    if (result.status === 'images-missing') {
+      toast.error(
+        'The images for this question are no longer available. Attach them again and send it.',
+      );
+    }
+  }, []);
+
+  const handleContinue = useCallback(() => {
+    const { activeId: conversationId, selectedModel } = useAppStore.getState();
+    if (!conversationId) return;
+    if (!selectedModel) {
+      toast.error('Pick a model first (⌘K)');
+      return;
+    }
+    void continueTutorMessage(conversationId, selectedModel);
+  }, []);
+
   const isEmpty = messages.length === 0 && !isCurrentChatStreaming;
 
   const PanelIcon = systemPanelOpen ? PanelRightClose : PanelRightOpen;
@@ -136,6 +206,7 @@ export function ChatArea() {
     <div className="flex flex-col h-full">
       {/* Toggle bar */}
       <div className="flex items-center justify-end px-3 py-1.5 shrink-0">
+        {developerMode && (
         <button
           onClick={toggleSystemPanel}
           className="p-1.5 rounded-md transition-colors cursor-pointer"
@@ -144,10 +215,11 @@ export function ChatArea() {
         >
           <PanelIcon size={16} />
         </button>
+        )}
       </div>
 
       {/* Data sources banner */}
-      {hasConnectedSources === false && !bannerDismissed && (
+      {developerMode && hasConnectedSources === false && !bannerDismissed && (
         <div
           className="mx-4 mb-2 flex items-center gap-3 px-4 py-3 rounded-lg text-sm shrink-0"
           style={{
@@ -192,7 +264,8 @@ export function ChatArea() {
               {getGreeting()}
             </h2>
             <p className="text-sm text-center max-w-sm mb-6" style={{ color: 'var(--color-text-secondary)' }}>
-              Ask anything. Your AI runs locally — private, fast, and always available.
+              Your JEE Physics, Chemistry and Maths tutor, for adults (18+). Type a question
+              or attach a photo of one.
             </p>
 
             {/* Quick action hints */}
@@ -209,8 +282,9 @@ export function ChatArea() {
                 onMouseLeave={(e) => (e.currentTarget.style.borderColor = 'var(--color-border)')}
               >
                 <Database size={14} style={{ color: 'var(--color-accent)' }} />
-                Connect Data Sources
+                {developerMode ? 'Connect Data Sources' : 'Add study material'}
               </button>
+              {developerMode && (
               <button
                 onClick={() => { navigate('/data-sources'); setTimeout(() => window.dispatchEvent(new CustomEvent('switch-tab', { detail: 'messaging' })), 100); }}
                 className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-xs cursor-pointer transition-colors"
@@ -225,6 +299,7 @@ export function ChatArea() {
                 <MessageSquare size={14} style={{ color: 'var(--color-accent)' }} />
                 Set Up Messaging Channels
               </button>
+              )}
             </div>
           </div>
         ) : (
@@ -232,11 +307,15 @@ export function ChatArea() {
             {messages.map((msg, i) => {
               const isLastAssistant =
                 i === messages.length - 1 && msg.role === 'assistant';
+              // Only the latest reply can be retried or continued.
+              const canAct = isLastAssistant && !streamState.isStreaming && !msg.isResearch;
               return (
                 <MessageBubble
                   key={msg.id}
                   message={msg}
                   isLive={isLastAssistant && isCurrentChatStreaming}
+                  onRetry={canAct ? handleRetry : undefined}
+                  onContinue={canAct ? handleContinue : undefined}
                 />
               );
             })}

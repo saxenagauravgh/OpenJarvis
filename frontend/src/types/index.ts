@@ -115,6 +115,30 @@ export interface LiveEnergyMetrics {
   duration_s: number;
 }
 
+/** Why a reply failed. Kept apart from `content` so it is never sent as history. */
+export interface MessageError {
+  code: string;
+  message: string;
+  retryable: boolean;
+}
+
+/** Something the user should know about a reply, such as a model fallback. */
+export interface MessageNotice {
+  code: string;
+  message: string;
+}
+
+export type FinishReason = 'stop' | 'length' | 'blocked';
+
+/** An uploaded file, as returned by POST /v1/tutor/attachments. */
+export interface ChatAttachment {
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+  kind: 'image' | 'pdf' | 'text';
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -127,6 +151,25 @@ export interface ChatMessage {
   usage?: TokenUsage;
   telemetry?: MessageTelemetry;
   audio?: { url: string };
+  /** Files sent with this message, held by the server (data is not stored). */
+  files?: ChatAttachment[];
+  /** File names of images sent by earlier versions (image data was not stored). */
+  attachments?: string[];
+  error?: MessageError;
+  notices?: MessageNotice[];
+  /** A settings change proposed with this reply. */
+  action?: SettingAction;
+  finishReason?: FinishReason;
+  /** The user stopped generation. */
+  stopped?: boolean;
+}
+
+export interface SettingAction {
+  setting: 'theme' | 'font_size' | 'voice_speed' | 'model';
+  value: string;
+  status: 'proposed' | 'applied' | 'dismissed';
+  /** What the setting was before it was applied, for Undo. */
+  previous?: string;
 }
 
 export interface Conversation {

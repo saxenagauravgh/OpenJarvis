@@ -29,3 +29,29 @@ describe('toSpeakableText', () => {
     expect(toSpeakableText('use file_read now')).toBe('use file_read now');
   });
 });
+
+describe('toSpeakableText maths', () => {
+  it('reads inline LaTeX as words', () => {
+    expect(toSpeakableText('Solve $3x^2 - 12 = 0$.')).toBe('Solve 3x squared minus 12 equals 0.');
+  });
+
+  it('reads fractions, roots and degrees', () => {
+    const spoken = toSpeakableText('$$h = \\frac{u^2}{2g}$$ and $\\sqrt{x}$ at $30^\\circ$');
+    expect(spoken).toContain('h equals u squared over 2g');
+    expect(spoken).toContain('square root of x');
+    expect(spoken).toContain('30 degrees');
+  });
+
+  it('leaves text without maths unchanged', () => {
+    expect(toSpeakableText('The pH is 2.')).toBe('The pH is 2.');
+  });
+});
+
+describe('normalizeMathDelimiters', () => {
+  it('converts \\( \\) and \\[ \\] to dollar delimiters', async () => {
+    const { normalizeMathDelimiters } = await import('./message-text');
+    expect(normalizeMathDelimiters('p = \\(\\frac{5}{8}\\)')).toBe('p = $\\frac{5}{8}$');
+    expect(normalizeMathDelimiters('\\[ x^2 \\]')).toBe('$$ x^2 $$');
+    expect(normalizeMathDelimiters('no maths here')).toBe('no maths here');
+  });
+});
