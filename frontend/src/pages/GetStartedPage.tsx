@@ -205,8 +205,8 @@ function HostedView() {
         className="text-sm mb-6 leading-relaxed max-w-md mx-auto"
         style={{ color: 'var(--color-text-secondary)' }}
       >
-        Private AI that runs on your hardware. Chat, tools, agents, and
-        energy profiling &mdash; no cloud required.
+        A JEE Physics, Chemistry and Maths tutor for adults (18+), with tools,
+        agents, and energy profiling.
       </p>
 
       {healthy === true && (
@@ -269,8 +269,8 @@ function DesktopView() {
           className="text-sm mb-4 leading-relaxed max-w-md mx-auto"
           style={{ color: 'var(--color-text-secondary)' }}
         >
-          Your local AI is ready. Everything runs on your device &mdash; no
-          data leaves your machine.
+          Your tutor is ready. Answers come from Google Gemini, with a model on
+          this computer as the fallback.
         </p>
         <span
           className="inline-block text-[11px] font-mono px-2.5 py-1 rounded-full"
@@ -342,8 +342,8 @@ function SelfHostedView() {
           className="text-sm mb-4 leading-relaxed max-w-md mx-auto"
           style={{ color: 'var(--color-text-secondary)' }}
         >
-          Private AI that runs on your hardware. Chat, tools, agents, and
-          energy profiling &mdash; no cloud required.
+          A JEE Physics, Chemistry and Maths tutor for adults (18+), with tools,
+          agents, and energy profiling.
         </p>
         <span
           className="inline-block text-[11px] font-mono px-2.5 py-1 rounded-full"
@@ -419,8 +419,8 @@ function SelfHostedView() {
           </p>
           <CodeBlock code={"git clone https://github.com/open-jarvis/OpenJarvis.git\ncd OpenJarvis\nuv sync --extra desktop\njarvis serve --port 8000"} />
           <p className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
-            The chat, dashboard, energy profiling, and cost comparison all run
-            locally on your machine.
+            This serves the chat, dashboard, energy profiling, and cost
+            comparison.
           </p>
         </Section>
 

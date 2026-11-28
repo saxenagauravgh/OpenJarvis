@@ -12,12 +12,17 @@ import { ResearchTimeline } from './ResearchTimeline';
 import { rehypeCitations } from '../../lib/rehype-citations';
 import { XRayFooter } from './XRayFooter';
 import { SpeakMessageButton } from './SpeakMessageButton';
+import { MessageError, MessageNotices, MessageOutcome } from './MessageStatus';
 import type { ChatMessage } from '../../types';
 import { normalizeMathDelimiters, stripThinkTags } from '../../lib/message-text';
 
 interface Props {
   message: ChatMessage;
   isLive?: boolean;
+  /** Offered on a failed reply that can be sent again. */
+  onRetry?: (messageId: string) => void;
+  /** Offered on a reply that was cut off at the length limit. */
+  onContinue?: () => void;
 }
 
 function getTextContent(node: any): string {
@@ -109,7 +114,7 @@ function CopyMessageButton({ content }: { content: string }) {
   );
 }
 
-export function MessageBubble({ message, isLive = false }: Props) {
+export function MessageBubble({ message, isLive = false, onRetry, onContinue }: Props) {
   const isUser = message.role === 'user';
 
   const cleanContent = useMemo(
@@ -183,6 +188,8 @@ export function MessageBubble({ message, isLive = false }: Props) {
       {/* Audio player (e.g. morning digest) */}
       {message.audio?.url && <AudioPlayer src={message.audio.url} />}
 
+      <MessageNotices notices={message.notices} />
+
       {/* Assistant message */}
       {cleanContent && (
         <div className="prose max-w-none">
@@ -199,13 +206,23 @@ export function MessageBubble({ message, isLive = false }: Props) {
         </div>
       )}
 
+      {message.error && (
+        <MessageError
+          error={message.error}
+          onRetry={onRetry ? () => onRetry(message.id) : undefined}
+        />
+      )}
+      {!isLive && <MessageOutcome message={message} onContinue={onContinue} />}
+
       {/* Footer: copy + read aloud + x-ray */}
-      <div className="flex items-center gap-2 mt-1.5">
-        <CopyMessageButton content={cleanContent} />
-        {!isUser && !isLive && (
-          <SpeakMessageButton messageId={message.id} content={cleanContent} />
-        )}
-      </div>
+      {cleanContent && (
+        <div className="flex items-center gap-2 mt-1.5">
+          <CopyMessageButton content={cleanContent} />
+          {!isLive && (
+            <SpeakMessageButton messageId={message.id} content={cleanContent} />
+          )}
+        </div>
+      )}
       <XRayFooter
         usage={message.usage}
         telemetry={message.telemetry}

@@ -2260,7 +2260,7 @@ function ChannelsTab({ agentId }: { agentId: string }) {
                       fontSize: 10, color: 'var(--color-text-secondary)',
                       textAlign: 'center', marginTop: 8,
                     }}>
-                      {'\uD83D\uDD12'} Read-only access {'\u00B7'} No data leaves your device
+                      {'\uD83D\uDD12'} Read-only access
                     </div>
                   </div>
                 )}

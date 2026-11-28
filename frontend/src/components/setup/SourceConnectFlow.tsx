@@ -438,7 +438,7 @@ function StepByStepPanel({
         fontSize: 11, color: 'var(--color-text-secondary)',
         marginBottom: 12, textAlign: 'center',
       }}>
-        Read-only access &middot; No data leaves your device
+        Read-only access
       </div>
 
       <div style={{ display: 'flex', gap: 8 }}>

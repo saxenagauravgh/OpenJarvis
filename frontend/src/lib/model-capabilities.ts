@@ -1,3 +1,6 @@
+/** Selected when the user has not chosen a model. */
+export const DEFAULT_MODEL = 'gemini-2.5-flash';
+
 const EMBEDDING_MODEL_PREFIXES = [
   'all-minilm',
   'bge-',

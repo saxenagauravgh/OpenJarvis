@@ -13,7 +13,7 @@ const BARS = Array.from({ length: 16 }, (_, i) => i);
 
 /**
  * Animated voice indicator for Talk mode: a glowing core inside rotating
- * rings. Each state has its own motion so a student can tell at a glance
+ * rings. Each state has its own motion so the user can tell at a glance
  * whether Jarvis is listening, thinking or speaking.
  */
 export function VoiceOrb({ state, size = 150 }: { state: OrbState; size?: number }) {

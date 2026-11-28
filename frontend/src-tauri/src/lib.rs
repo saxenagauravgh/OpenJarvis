@@ -3418,23 +3418,8 @@ pub fn run() {
                 native_overlay::create(include_str!("overlay.html"), JARVIS_PORT);
             }
 
-            // Register Cmd+Shift+Space to toggle the overlay
-            {
-                use tauri_plugin_global_shortcut::{
-                    Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
-                };
-                let sc = Shortcut::new(Some(Modifiers::META | Modifiers::SHIFT), Code::Space);
-                if let Err(e) = app.global_shortcut().on_shortcut(sc, |_app, _sc, ev| {
-                    if ev.state == ShortcutState::Pressed {
-                        #[cfg(target_os = "macos")]
-                        unsafe {
-                            native_overlay::toggle();
-                        }
-                    }
-                }) {
-                    eprintln!("Warning: could not register Cmd+Shift+Space: {e}");
-                }
-            }
+            // No global shortcut opens the overlay: it uses the old chat route
+            // and would skip the app's 18+ confirmation.
 
             // Returning users keep automatic startup after they have persisted
             // a source. Fresh installs stay inert until the setup UI records

@@ -6,6 +6,9 @@ import { StreamingDots } from './StreamingDots';
 import { useAppStore } from '../../lib/store';
 import { shouldAutoplayFinishedReply, useTtsStore } from '../../lib/tts';
 import { stripThinkTags } from '../../lib/message-text';
+import { isSpeakableReply } from '../../lib/chat/history';
+import { continueTutorMessage, retryTutorMessage } from '../../lib/chat/sendTutorMessage';
+import { toast } from 'sonner';
 import { Sparkles, PanelRightOpen, PanelRightClose, Database, MessageSquare, X } from 'lucide-react';
 import { listConnectors } from '../../lib/connectors-api';
 
@@ -83,9 +86,10 @@ export function ChatArea() {
       if (!stillSpeaking) return;
       if (currentLast?.id !== completedMessageId || currentTts.available !== true) return;
       if (currentTts.autoSpokenId === completedMessageId) return;
+      // Failed, blocked and empty replies are never read out as answers.
+      if (!isSpeakableReply(currentLast)) return;
 
       const text = stripThinkTags(currentLast.content);
-      if (!text) return;
       currentTts.markAutoSpoken(completedMessageId);
       void currentTts.speak(completedMessageId, text);
     });
@@ -132,6 +136,31 @@ export function ChatArea() {
       shouldAutoScroll.current = distance < 2;
     }
   };
+
+  const handleRetry = useCallback(async (messageId: string) => {
+    const { activeId: conversationId, selectedModel } = useAppStore.getState();
+    if (!conversationId) return;
+    if (!selectedModel) {
+      toast.error('Pick a model first (⌘K)');
+      return;
+    }
+    const result = await retryTutorMessage(conversationId, messageId, selectedModel);
+    if (result.status === 'images-missing') {
+      toast.error(
+        'The images for this question are no longer available. Attach them again and send it.',
+      );
+    }
+  }, []);
+
+  const handleContinue = useCallback(() => {
+    const { activeId: conversationId, selectedModel } = useAppStore.getState();
+    if (!conversationId) return;
+    if (!selectedModel) {
+      toast.error('Pick a model first (⌘K)');
+      return;
+    }
+    void continueTutorMessage(conversationId, selectedModel);
+  }, []);
 
   const isEmpty = messages.length === 0 && !isCurrentChatStreaming;
 
@@ -197,7 +226,8 @@ export function ChatArea() {
               {getGreeting()}
             </h2>
             <p className="text-sm text-center max-w-sm mb-6" style={{ color: 'var(--color-text-secondary)' }}>
-              Ask anything. Your AI runs locally — private, fast, and always available.
+              Your JEE Physics, Chemistry and Maths tutor, for adults (18+). Type a question
+              or attach a photo of one.
             </p>
 
             {/* Quick action hints */}
@@ -237,11 +267,15 @@ export function ChatArea() {
             {messages.map((msg, i) => {
               const isLastAssistant =
                 i === messages.length - 1 && msg.role === 'assistant';
+              // Only the latest reply can be retried or continued.
+              const canAct = isLastAssistant && !streamState.isStreaming && !msg.isResearch;
               return (
                 <MessageBubble
                   key={msg.id}
                   message={msg}
                   isLive={isLastAssistant && isCurrentChatStreaming}
+                  onRetry={canAct ? handleRetry : undefined}
+                  onContinue={canAct ? handleContinue : undefined}
                 />
               );
             })}

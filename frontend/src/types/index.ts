@@ -115,6 +115,21 @@ export interface LiveEnergyMetrics {
   duration_s: number;
 }
 
+/** Why a reply failed. Kept apart from `content` so it is never sent as history. */
+export interface MessageError {
+  code: string;
+  message: string;
+  retryable: boolean;
+}
+
+/** Something the user should know about a reply, such as a model fallback. */
+export interface MessageNotice {
+  code: string;
+  message: string;
+}
+
+export type FinishReason = 'stop' | 'length' | 'blocked';
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -129,6 +144,11 @@ export interface ChatMessage {
   audio?: { url: string };
   /** File names of images sent with this message (image data is not stored). */
   attachments?: string[];
+  error?: MessageError;
+  notices?: MessageNotice[];
+  finishReason?: FinishReason;
+  /** The user stopped generation. */
+  stopped?: boolean;
 }
 
 export interface Conversation {

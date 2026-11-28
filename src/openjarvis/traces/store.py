@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import sqlite3
@@ -107,6 +108,17 @@ INSERT INTO trace_steps (
 """
 
 
+def _json_default(value: Any) -> str:
+    """Store binary values (e.g. model signatures) as base64 text."""
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return base64.b64encode(bytes(value)).decode("ascii")
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def _dumps(value: Any) -> str:
+    return json.dumps(value, default=_json_default)
+
+
 def _db_locked(func):
     """Serialize access to the connection shared by trace worker threads."""
 
@@ -178,42 +190,48 @@ class TraceStore:
         single writer — see ``server/app.py`` — rather than swallowing
         collisions here.
         """
-        self._conn.execute(
-            _INSERT_TRACE,
-            (
-                trace.trace_id,
-                trace.query,
-                trace.agent,
-                trace.model,
-                trace.engine,
-                trace.result,
-                trace.outcome,
-                trace.feedback,
-                trace.started_at,
-                trace.ended_at,
-                trace.total_tokens,
-                trace.total_latency_seconds,
-                json.dumps(trace.metadata),
-                json.dumps(trace.messages),
-            ),
-        )
-        for idx, step in enumerate(trace.steps):
+        # A failure part-way (e.g. an unserializable step) must not leave the
+        # trace row in an open transaction for the next save to commit.
+        try:
             self._conn.execute(
-                _INSERT_STEP,
+                _INSERT_TRACE,
                 (
                     trace.trace_id,
-                    idx,
-                    step.step_type.value
-                    if isinstance(step.step_type, StepType)
-                    else step.step_type,
-                    step.timestamp,
-                    step.duration_seconds,
-                    json.dumps(step.input),
-                    json.dumps(step.output),
-                    json.dumps(step.metadata),
+                    trace.query,
+                    trace.agent,
+                    trace.model,
+                    trace.engine,
+                    trace.result,
+                    trace.outcome,
+                    trace.feedback,
+                    trace.started_at,
+                    trace.ended_at,
+                    trace.total_tokens,
+                    trace.total_latency_seconds,
+                    _dumps(trace.metadata),
+                    _dumps(trace.messages),
                 ),
             )
-        self._conn.commit()
+            for idx, step in enumerate(trace.steps):
+                self._conn.execute(
+                    _INSERT_STEP,
+                    (
+                        trace.trace_id,
+                        idx,
+                        step.step_type.value
+                        if isinstance(step.step_type, StepType)
+                        else step.step_type,
+                        step.timestamp,
+                        step.duration_seconds,
+                        _dumps(step.input),
+                        _dumps(step.output),
+                        _dumps(step.metadata),
+                    ),
+                )
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
 
     @_db_locked
     def get(self, trace_id: str) -> Optional[Trace]:

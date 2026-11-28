@@ -40,8 +40,8 @@
       "icons/icon.png"
     ],
     "category": "Utility",
-    "shortDescription": "On-device AI assistant with energy monitoring and trace debugging",
-    "longDescription": "OpenJarvis Desktop wraps the OpenJarvis research framework in a native desktop application with real-time energy monitoring, trace debugging, learning curve visualization, and memory browsing.",
+    "shortDescription": "AI assistant with energy monitoring and trace debugging. 18+ only",
+    "longDescription": "OpenJarvis Desktop wraps the OpenJarvis research framework in a native desktop application with real-time energy monitoring, trace debugging, learning curve visualization, and memory browsing. 18+ only.",
     "macOS": {
       "entitlements": "Entitlements.plist",
       "minimumSystemVersion": "10.15",

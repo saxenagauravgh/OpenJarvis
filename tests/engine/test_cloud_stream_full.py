@@ -6,7 +6,7 @@ from __future__ import annotations
 import sys
 from types import ModuleType, SimpleNamespace
 from typing import Any, List
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -83,6 +83,20 @@ def _google_stream_chunk(
         candidates=candidates,
         usage_metadata=usage_metadata,
     )
+
+
+async def _async_chunks(chunks: list) -> Any:
+    for chunk in chunks:
+        yield chunk
+
+
+def _google_client(*streams: list) -> MagicMock:
+    """A Gemini client whose async stream returns each list of chunks in turn."""
+    client = MagicMock()
+    client.aio.models.generate_content_stream = AsyncMock(
+        side_effect=[_async_chunks(chunks) for chunks in streams]
+    )
+    return client
 
 
 def _google_types_modules() -> dict[str, ModuleType]:
@@ -453,8 +467,7 @@ def test_prepare_anthropic_messages_tool_calls():
 @pytest.mark.asyncio
 async def test_stream_full_google_text_only(monkeypatch: pytest.MonkeyPatch):
     """Google text chunks retain their content and finish normally."""
-    client = MagicMock()
-    client.models.generate_content_stream.return_value = iter(
+    client = _google_client(
         [_google_stream_chunk(text="Hello"), _google_stream_chunk(text=" world")]
     )
     engine = _make_cloud_engine(google_client=client)
@@ -481,10 +494,7 @@ async def test_stream_full_google_preserves_tool_calls(monkeypatch: pytest.Monke
     part = SimpleNamespace(
         function_call=function_call, text=None, thought_signature=b"sig"
     )
-    client = MagicMock()
-    client.models.generate_content_stream.return_value = iter(
-        [_google_stream_chunk(part)]
-    )
+    client = _google_client([_google_stream_chunk(part)])
     engine = _make_cloud_engine(google_client=client)
     engine._thought_sigs = {}
     messages = [Message(role=Role.USER, content="weather")]
@@ -522,7 +532,7 @@ async def test_stream_full_google_preserves_tool_calls(monkeypatch: pytest.Monke
     assert tool_call["thought_signature"] == b"sig"
     assert engine._thought_sigs[tool_call["id"]] == b"sig"
     assert result[-1].finish_reason == "tool_calls"
-    config = client.models.generate_content_stream.call_args.kwargs["config"]
+    config = client.aio.models.generate_content_stream.call_args.kwargs["config"]
     assert config.tools == [
         {
             "function_declarations": [
@@ -550,8 +560,7 @@ async def test_stream_full_google_preserves_mixed_and_multiple_calls(
     calendar_part = SimpleNamespace(
         function_call=calendar, text=None, thought_signature=None
     )
-    client = MagicMock()
-    client.models.generate_content_stream.return_value = iter(
+    client = _google_client(
         [
             _google_stream_chunk(text_part, weather_part),
             _google_stream_chunk(calendar_part),
@@ -599,10 +608,7 @@ async def test_stream_full_google_keeps_parallel_same_name_calls_distinct(
         SimpleNamespace(function_call=paris, text=None, thought_signature=b"sig"),
         SimpleNamespace(function_call=london, text=None, thought_signature=None),
     ]
-    client = MagicMock()
-    client.models.generate_content_stream.return_value = iter(
-        [_google_stream_chunk(*parts)]
-    )
+    client = _google_client([_google_stream_chunk(*parts)])
     engine = _make_cloud_engine(google_client=client)
     engine._thought_sigs = {}
 
@@ -641,11 +647,10 @@ async def test_stream_full_google_ids_are_unique_across_requests(
         text=None,
         thought_signature=b"london-sig",
     )
-    client = MagicMock()
-    client.models.generate_content_stream.side_effect = [
-        iter([_google_stream_chunk(first_part)]),
-        iter([_google_stream_chunk(second_part)]),
-    ]
+    client = _google_client(
+        [_google_stream_chunk(first_part)],
+        [_google_stream_chunk(second_part)],
+    )
     engine = _make_cloud_engine(google_client=client)
     engine._thought_sigs = {}
 
@@ -678,8 +683,7 @@ async def test_stream_full_google_ids_are_unique_across_requests(
 async def test_stream_full_google_emits_final_usage(monkeypatch: pytest.MonkeyPatch):
     """Google's final usage metadata is normalized onto the terminal chunk."""
     usage = SimpleNamespace(prompt_token_count=12, candidates_token_count=5)
-    client = MagicMock()
-    client.models.generate_content_stream.return_value = iter(
+    client = _google_client(
         [
             _google_stream_chunk(text="Hello"),
             _google_stream_chunk(usage_metadata=usage),
@@ -712,8 +716,7 @@ async def test_stream_full_google_replays_signature_on_part(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """A saved Gemini signature is replayed beside, not inside, function_call."""
-    client = MagicMock()
-    client.models.generate_content_stream.return_value = iter([])
+    client = _google_client([])
     engine = _make_cloud_engine(google_client=client)
     engine._thought_sigs = {"google_get_weather_0": b"sig"}
     messages = [
@@ -742,7 +745,7 @@ async def test_stream_full_google_replays_signature_on_part(
             )
         ]
 
-    contents = client.models.generate_content_stream.call_args.kwargs["contents"]
+    contents = client.aio.models.generate_content_stream.call_args.kwargs["contents"]
     assert contents[1]["parts"] == [
         {
             "function_call": {

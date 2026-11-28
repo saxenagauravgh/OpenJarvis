@@ -15,7 +15,8 @@ import type {
   TokenUsage,
 } from '../types';
 import type { ManagedAgent } from './api';
-import { isCloudModel, isEmbedOnlyModel } from './model-capabilities';
+import { DEFAULT_MODEL, isCloudModel, isEmbedOnlyModel } from './model-capabilities';
+import { loadAdultConfirmation, saveAdultConfirmation } from './age-gate';
 import { serializeToolCallArguments } from './tool-call';
 
 export interface CachedConnector {
@@ -36,11 +37,7 @@ export interface AgentEvent {
 
 const CONVERSATIONS_KEY = 'openjarvis-conversations';
 const SETTINGS_KEY = 'openjarvis-settings';
-const OPTIN_KEY = 'openjarvis-optin';
-const OPTIN_NAME_KEY = 'openjarvis-display-name';
-const OPTIN_EMAIL_KEY = 'openjarvis-email';
-const OPTIN_ANONID_KEY = 'openjarvis-anon-id';
-const OPTIN_SEEN_KEY = 'openjarvis-optin-seen';
+const SELECTED_MODEL_KEY = 'openjarvis-selected-model';
 
 interface ConversationStore {
   version: 1;
@@ -140,6 +137,23 @@ function saveSettings(settings: Settings): void {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
 }
 
+/** The model the user last chose, or '' if they never chose one. */
+function loadSavedModel(): string {
+  try {
+    return localStorage.getItem(SELECTED_MODEL_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+function saveSelectedModel(model: string): void {
+  try {
+    localStorage.setItem(SELECTED_MODEL_KEY, model);
+  } catch {
+    // Storage unavailable: the choice lasts for this session only.
+  }
+}
+
 // ── Store ─────────────────────────────────────────────────────────────
 
 const INITIAL_STREAM: StreamState = {
@@ -177,13 +191,8 @@ interface AppState {
   // System panel
   systemPanelOpen: boolean;
 
-  // Opt-in sharing
-  optInEnabled: boolean;
-  optInDisplayName: string;
-  optInEmail: string;
-  optInAnonId: string;
-  optInModalSeen: boolean;
-  optInModalOpen: boolean;
+  // 18+ confirmation
+  adultConfirmed: boolean;
 
   // Actions: conversations
   loadConversations: () => void;
@@ -203,6 +212,12 @@ interface AppState {
     researchTraces?: ResearchSearchTrace[],
     researchSources?: ResearchSource[],
   ) => void;
+  patchMessage: (
+    conversationId: string,
+    messageId: string,
+    patch: Partial<ChatMessage>,
+  ) => void;
+  removeMessage: (conversationId: string, messageId: string) => void;
   setStreamState: (state: Partial<StreamState>) => void;
   resetStream: () => void;
 
@@ -257,10 +272,9 @@ interface AppState {
   addAgentEvent: (event: AgentEvent) => void;
   clearAgentEvents: () => void;
 
-  // Actions: opt-in sharing
-  setOptIn: (enabled: boolean, displayName: string, email: string) => void;
-  setOptInModalOpen: (open: boolean) => void;
-  markOptInModalSeen: () => void;
+  // Actions: 18+ confirmation
+  confirmAdult: () => void;
+  revokeAdultConfirmation: () => void;
 
   // Logs
   logEntries: LogEntry[];
@@ -273,6 +287,27 @@ interface AppState {
 }
 
 export const useAppStore = create<AppState>((set, get) => {
+  /** Apply a change to one stored conversation and refresh the views of it. */
+  const editConversation = (
+    conversationId: string,
+    edit: (conversation: Conversation) => void,
+  ) => {
+    const store = loadConversations();
+    const conv = store.conversations[conversationId];
+    if (!conv) return;
+    edit(conv);
+    conv.updatedAt = Date.now();
+    saveConversations(store);
+    const conversations = Object.values(store.conversations).sort(
+      (a, b) => b.updatedAt - a.updatedAt,
+    );
+    if (get().activeId === conversationId) {
+      set({ messages: [...conv.messages], conversations });
+    } else {
+      set({ conversations });
+    }
+  };
+
   const initial = loadConversations();
   const convList = Object.values(initial.conversations).sort(
     (a, b) => b.updatedAt - a.updatedAt,
@@ -289,7 +324,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
     models: [],
     modelsLoading: true,
-    selectedModel: '',
+    selectedModel: loadSavedModel() || loadSettings().defaultModel || DEFAULT_MODEL,
     serverInfo: null,
     savings: null,
 
@@ -299,12 +334,7 @@ export const useAppStore = create<AppState>((set, get) => {
     sidebarOpen: true,
     systemPanelOpen: true,
 
-    optInEnabled: localStorage.getItem(OPTIN_KEY) === 'true',
-    optInDisplayName: localStorage.getItem(OPTIN_NAME_KEY) || '',
-    optInEmail: localStorage.getItem(OPTIN_EMAIL_KEY) || '',
-    optInAnonId: localStorage.getItem(OPTIN_ANONID_KEY) || crypto.randomUUID(),
-    optInModalSeen: localStorage.getItem(OPTIN_SEEN_KEY) === 'true',
-    optInModalOpen: false,
+    adultConfirmed: loadAdultConfirmation(),
 
     // ── Conversations ───────────────────────────────────────────────
 
@@ -474,6 +504,19 @@ export const useAppStore = create<AppState>((set, get) => {
       }
     },
 
+    patchMessage: (conversationId, messageId, patch) => {
+      editConversation(conversationId, (conv) => {
+        const message = conv.messages.find((m) => m.id === messageId);
+        if (message) Object.assign(message, patch);
+      });
+    },
+
+    removeMessage: (conversationId, messageId) => {
+      editConversation(conversationId, (conv) => {
+        conv.messages = conv.messages.filter((m) => m.id !== messageId);
+      });
+    },
+
     setStreamState: (partial: Partial<StreamState>) => {
       set((s) => ({ streamState: { ...s.streamState, ...partial } }));
     },
@@ -499,34 +542,30 @@ export const useAppStore = create<AppState>((set, get) => {
         // embedder and every chat failed with HTTP 400 "does not support
         // chat". Prefer a real chat model for selection / fallback.
         const chatModels = models.filter((m) => !isEmbedOnlyModel(m.id));
-        const preferred =
-          (state.settings.defaultModel &&
-            (isCloudModel(state.settings.defaultModel) ||
-              chatModels.some((m) => m.id === state.settings.defaultModel)) &&
-            state.settings.defaultModel) ||
-          chatModels[0]?.id ||
-          models.find((m) => !isEmbedOnlyModel(m.id))?.id ||
-          '';
+        // Cloud models need not appear in the server's list.
+        const usable = (id: string) =>
+          !!id &&
+          !isEmbedOnlyModel(id) &&
+          (isCloudModel(id) || chatModels.some((m) => m.id === id));
 
-        const currentIsBad =
-          !!state.selectedModel && isEmbedOnlyModel(state.selectedModel);
-        const currentMissing =
-          !!state.selectedModel &&
-          !isCloudModel(state.selectedModel) &&
-          !models.some((m) => m.id === state.selectedModel);
+        // The user's own choice wins as soon as it is available, including
+        // after a stand-in was selected because the list was incomplete.
+        const saved = loadSavedModel();
+        if (usable(saved)) return { models, selectedModel: saved };
+        if (usable(state.selectedModel)) return { models };
 
-        if (!state.selectedModel || currentIsBad || currentMissing) {
-          // Prefer a real chat model. If none exist, clear a bad/missing
-          // selection rather than keeping an embed-only id that 400s on chat.
-          return {
-            models,
-            selectedModel: preferred,
-          };
-        }
-        return { models };
+        // Prefer a real chat model. If none exist, clear a bad/missing
+        // selection rather than keeping an embed-only id that 400s on chat.
+        const preferred = usable(state.settings.defaultModel)
+          ? state.settings.defaultModel
+          : chatModels[0]?.id || '';
+        return { models, selectedModel: preferred };
       }),
     setModelsLoading: (loading: boolean) => set({ modelsLoading: loading }),
-    setSelectedModel: (model: string) => set({ selectedModel: model }),
+    setSelectedModel: (model: string) => {
+      if (model) saveSelectedModel(model);
+      set({ selectedModel: model });
+    },
     setServerInfo: (info: ServerInfo | null) => set({ serverInfo: info }),
     setSavings: (data: SavingsData | null) => set({ savings: data }),
     incrementSavings: (usage: TokenUsage) => {
@@ -596,20 +635,15 @@ export const useAppStore = create<AppState>((set, get) => {
     modelLoading: false,
     setModelLoading: (loading) => set({ modelLoading: loading }),
 
-    // ── Opt-in sharing ──────────────────────────────────────────────
+    // ── 18+ confirmation ────────────────────────────────────────────
 
-    setOptIn: (enabled: boolean, displayName: string, email: string) => {
-      const anonId = get().optInAnonId;
-      localStorage.setItem(OPTIN_KEY, String(enabled));
-      localStorage.setItem(OPTIN_NAME_KEY, displayName);
-      localStorage.setItem(OPTIN_EMAIL_KEY, email);
-      localStorage.setItem(OPTIN_ANONID_KEY, anonId);
-      set({ optInEnabled: enabled, optInDisplayName: displayName, optInEmail: email });
+    confirmAdult: () => {
+      saveAdultConfirmation(true);
+      set({ adultConfirmed: true });
     },
-    setOptInModalOpen: (open: boolean) => set({ optInModalOpen: open }),
-    markOptInModalSeen: () => {
-      localStorage.setItem(OPTIN_SEEN_KEY, 'true');
-      set({ optInModalSeen: true });
+    revokeAdultConfirmation: () => {
+      saveAdultConfirmation(false);
+      set({ adultConfirmed: false });
     },
   };
 });

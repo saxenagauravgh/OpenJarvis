@@ -7,15 +7,20 @@ import logging
 import uuid
 from typing import List, Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from openjarvis.connectors.store import KnowledgeStore
 from openjarvis.core.config import DEFAULT_CONFIG_DIR
+from openjarvis.server.origin import require_trusted_origin
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/v1/connectors/upload", tags=["upload"])
+router = APIRouter(
+    prefix="/v1/connectors/upload",
+    tags=["upload"],
+    dependencies=[Depends(require_trusted_origin)],
+)
 
 # ---------------------------------------------------------------------------
 # Helpers

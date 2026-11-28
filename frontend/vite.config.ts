@@ -27,7 +27,7 @@ export default defineConfig({
       manifest: {
         name: 'OpenJarvis',
         short_name: 'Jarvis',
-        description: 'On-device AI assistant',
+        description: 'JEE tutor for adults (18+ only)',
         theme_color: '#161618',
         background_color: '#161618',
         display: 'standalone',
