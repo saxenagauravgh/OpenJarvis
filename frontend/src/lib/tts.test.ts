@@ -252,3 +252,15 @@ describe('autoplay gating', () => {
     ).toBe(false);
   });
 });
+
+describe('splitForSpeech', () => {
+  it('keeps short text whole and starts long text with a short piece', async () => {
+    const { splitForSpeech } = await import('./tts');
+    expect(splitForSpeech('Hello there. How are you?')).toEqual(['Hello there. How are you?']);
+    const long = Array.from({ length: 80 }, (_, i) => `This is sentence number ${i}.`).join(' ');
+    const chunks = splitForSpeech(long);
+    expect(chunks[0].length).toBeLessThanOrEqual(240);
+    expect(Math.max(...chunks.map((c) => c.length))).toBeLessThanOrEqual(1200);
+    expect(chunks.join(' ')).toBe(long);
+  });
+});

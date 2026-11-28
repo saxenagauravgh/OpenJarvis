@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { synthesizeSpeech, fetchTtsHealth } from './api';
 import { toSpeakableText } from './message-text';
+import { charIndexAtFraction } from './caption';
 
 export type TtsState = 'idle' | 'loading' | 'speaking';
 
@@ -26,6 +27,8 @@ interface TtsStore {
   stop: () => void;
   ensureHealth: () => Promise<void>;
   markAutoSpoken: (id: string) => void;
+  /** Text being read aloud and the position of the current word in it. */
+  caption: { text: string; charIndex: number } | null;
 }
 
 // Playback handles are not render state -- keeping them out of the store avoids
@@ -35,6 +38,34 @@ let objectUrl: string | null = null;
 let controller: AbortController | null = null;
 let token = 0;
 let healthProbe: Promise<void> | null = null;
+let captionFrame = 0;
+
+function stopCaptions(): void {
+  if (captionFrame && typeof cancelAnimationFrame === 'function') {
+    cancelAnimationFrame(captionFrame);
+  }
+  captionFrame = 0;
+  useTtsStore.setState({ caption: null });
+}
+
+function showCaption(text: string, charIndex: number): void {
+  const now = useTtsStore.getState().caption;
+  if (now?.text === text && now.charIndex === charIndex) return;
+  useTtsStore.setState({ caption: { text, charIndex } });
+}
+
+/** Follow the audio, moving the highlight to the word it has probably reached. */
+function followAudio(el: HTMLAudioElement, text: string): void {
+  if (typeof requestAnimationFrame !== 'function') return;
+  if (captionFrame) cancelAnimationFrame(captionFrame);
+  const tick = () => {
+    if (audio !== el) return;
+    const fraction = el.duration > 0 ? el.currentTime / el.duration : 0;
+    showCaption(text, charIndexAtFraction(text, fraction || 0));
+    captionFrame = requestAnimationFrame(tick);
+  };
+  tick();
+}
 /** True when the server has no TTS backend and we speak with the OS voices. */
 let useBrowserVoice = false;
 
@@ -52,6 +83,29 @@ function pickBrowserVoice(synth: SpeechSynthesis): SpeechSynthesisVoice | null {
     voices.find((v) => v.lang?.toLowerCase().startsWith(prefix) && v.localService) ??
     voices.find((v) => v.lang?.toLowerCase().startsWith(prefix));
   return byLang('en-in') ?? byLang('en-gb') ?? byLang('en') ?? voices[0] ?? null;
+}
+
+const FIRST_CHUNK_CHARS = 240;
+const CHUNK_CHARS = 1200;
+
+/** Split speech at sentence ends: a short first piece, then longer ones. */
+export function splitForSpeech(text: string): string[] {
+  const chunks: string[] = [];
+  let current = '';
+  const limit = () => (chunks.length === 0 ? FIRST_CHUNK_CHARS : CHUNK_CHARS);
+  for (const sentence of text.split(/(?<=[.!?;:।])\s+/)) {
+    // A sentence longer than a whole piece is broken between words.
+    const units = sentence.length > CHUNK_CHARS ? sentence.split(/\s+/) : [sentence];
+    for (const unit of units) {
+      if (current && current.length + unit.length + 1 > limit()) {
+        chunks.push(current);
+        current = '';
+      }
+      current = current ? `${current} ${unit}` : unit;
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks;
 }
 
 /** Only a stream ending in the active conversation may trigger autoplay. */
@@ -90,7 +144,8 @@ function teardown(): void {
     controller.abort();
     controller = null;
   }
-  if (useBrowserVoice) browserSynth()?.cancel();
+  browserSynth()?.cancel();
+  stopCaptions();
 }
 
 export const useTtsStore = create<TtsStore>((set, get) => ({
@@ -100,6 +155,7 @@ export const useTtsStore = create<TtsStore>((set, get) => ({
   errorId: null,
   available: null,
   autoSpokenId: null,
+  caption: null,
 
   ensureHealth: () => {
     if (healthProbe) return healthProbe;
@@ -131,19 +187,25 @@ export const useTtsStore = create<TtsStore>((set, get) => ({
     teardown();
     set({ state: 'loading', speakingId: id, error: null, errorId: null });
 
-    const synth = useBrowserVoice ? browserSynth() : null;
-    if (synth) {
-      const utterance = new SpeechSynthesisUtterance(trimmed);
+    const speakWithBrowser = (synth: SpeechSynthesis, spoken: string = trimmed) => {
+      const utterance = new SpeechSynthesisUtterance(spoken);
       const voice = pickBrowserVoice(synth);
       if (voice) {
         utterance.voice = voice;
         utterance.lang = voice.lang;
       }
       utterance.onstart = () => {
-        if (mine === token) set({ state: 'speaking', speakingId: id });
+        if (mine !== token) return;
+        set({ state: 'speaking', speakingId: id });
+        showCaption(spoken, 0);
+      };
+      utterance.onboundary = (event) => {
+        if (mine === token) showCaption(spoken, event.charIndex);
       };
       utterance.onend = () => {
-        if (mine === token) set({ state: 'idle', speakingId: null });
+        if (mine !== token) return;
+        set({ state: 'idle', speakingId: null });
+        stopCaptions();
       };
       utterance.onerror = (event) => {
         if (mine !== token) return;
@@ -157,45 +219,78 @@ export const useTtsStore = create<TtsStore>((set, get) => ({
         });
       };
       synth.speak(utterance);
+    };
+
+    const synth = useBrowserVoice ? browserSynth() : null;
+    if (synth) {
+      speakWithBrowser(synth);
       return;
     }
 
     const ac = new AbortController();
     controller = ac;
 
-    try {
-      const blob = await synthesizeSpeech(trimmed, { signal: ac.signal });
-      if (mine !== token) return;
+    // Long replies are synthesized in pieces so speech starts after the first
+    // sentence or two, and the next piece is fetched while this one plays.
+    const chunks = splitForSpeech(trimmed);
+    const fetchChunk = (index: number) => {
+      const request = synthesizeSpeech(chunks[index], { signal: ac.signal });
+      request.catch(() => {}); // awaited later; must not count as unhandled
+      return request;
+    };
 
-      const url = URL.createObjectURL(blob);
-      objectUrl = url;
-      const el = new Audio(url);
-      audio = el;
-
-      el.onended = () => {
+    const playFrom = async (index: number, pending: Promise<Blob>): Promise<void> => {
+      try {
+        const blob = await pending;
         if (mine !== token) return;
-        teardown();
-        set({ state: 'idle', speakingId: null });
-      };
-      el.onerror = () => {
-        if (mine !== token) return;
-        teardown();
-        set({ state: 'idle', speakingId: null, error: 'Playback failed', errorId: id });
-      };
+        const next = index + 1 < chunks.length ? fetchChunk(index + 1) : null;
 
-      await el.play();
-      if (mine === token) set({ state: 'speaking', speakingId: id });
-    } catch (err) {
-      if (mine !== token) return;
-      if (err instanceof DOMException && err.name === 'AbortError') return;
-      teardown();
-      set({
-        state: 'idle',
-        speakingId: null,
-        error: err instanceof Error ? err.message : 'Speech synthesis failed',
-        errorId: id,
-      });
-    }
+        if (objectUrl) URL.revokeObjectURL(objectUrl);
+        const url = URL.createObjectURL(blob);
+        objectUrl = url;
+        const el = new Audio(url);
+        audio = el;
+
+        el.onended = () => {
+          if (mine !== token) return;
+          if (next) {
+            void playFrom(index + 1, next);
+            return;
+          }
+          teardown();
+          set({ state: 'idle', speakingId: null });
+        };
+        el.onerror = () => {
+          if (mine !== token) return;
+          teardown();
+          set({ state: 'idle', speakingId: null, error: 'Playback failed', errorId: id });
+        };
+
+        await el.play();
+        if (mine === token) {
+          set({ state: 'speaking', speakingId: id });
+          followAudio(el, chunks[index]);
+        }
+      } catch (err) {
+        if (mine !== token) return;
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        teardown();
+        // The server voice failed (quota, offline): the OS voice reads the rest.
+        const fallback = browserSynth();
+        if (fallback) {
+          speakWithBrowser(fallback, chunks.slice(index).join(' '));
+          return;
+        }
+        set({
+          state: 'idle',
+          speakingId: null,
+          error: err instanceof Error ? err.message : 'Speech synthesis failed',
+          errorId: id,
+        });
+      }
+    };
+
+    await playFrom(0, fetchChunk(0));
   },
 
   stop: () => {
@@ -218,5 +313,6 @@ export function __resetTtsForTests(): void {
     errorId: null,
     available: null,
     autoSpokenId: null,
+    caption: null,
   });
 }

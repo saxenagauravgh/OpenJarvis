@@ -8,7 +8,8 @@ import { isSpeakableReply } from '../../lib/chat/history';
 import { listConnectors, getSyncStatus } from '../../lib/connectors-api';
 import { resolveChatEngine } from '../../lib/chat-telemetry';
 import { MicButton } from './MicButton';
-import { VoiceOrb, type OrbState } from './VoiceOrb';
+import type { OrbState } from './VoiceOrb';
+import { SpeechCaption } from './SpeechCaption';
 import { useSpeech } from '../../hooks/useSpeech';
 import { useTtsStore } from '../../lib/tts';
 import type {
@@ -635,6 +636,10 @@ export function InputArea() {
         : streamState.isStreaming || conversationPhase === 'waiting'
           ? 'thinking'
           : 'idle';
+  const setVoiceOrbState = useAppStore((s) => s.setVoiceOrbState);
+  useEffect(() => {
+    setVoiceOrbState(orbState);
+  }, [orbState, setVoiceOrbState]);
 
   const conversationLabel = !conversationMode
     ? 'Talk'
@@ -661,7 +666,7 @@ export function InputArea() {
 
   return (
     <div className="px-4 pb-4 pt-2" style={{ maxWidth: 'var(--chat-max-width)', margin: '0 auto', width: '100%' }}>
-      {conversationMode && <VoiceOrb state={orbState} />}
+      <SpeechCaption />
       <div className="mb-2 flex flex-col gap-1">
         <div className="flex items-center gap-2">
           <button
