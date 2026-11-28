@@ -29,7 +29,7 @@ export function quietDetector(): VoiceDetector {
   return {
     push: (rms, now) => {
       floor = Math.min(floor, rms);
-      return held(rms > clamp(floor * 3, 0.015, 0.05), now);
+      return held(rms > clamp(floor * 3, 0.012, 0.05), now);
     },
   };
 }
@@ -56,7 +56,7 @@ export function interruptDetector(calibrationMs = 700): VoiceDetector {
         // The upper quartile, so a word spoken during calibration counts less.
         const sorted = [...echo].sort((a, b) => a - b);
         const loudEcho = sorted[Math.floor(sorted.length * 0.75)] ?? 0;
-        threshold = clamp(loudEcho * 1.7, 0.025, 0.12);
+        threshold = clamp(loudEcho * 1.7, 0.012, 0.12);
       }
       return held(rms > threshold, now);
     },

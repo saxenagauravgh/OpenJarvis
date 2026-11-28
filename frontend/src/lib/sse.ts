@@ -80,6 +80,8 @@ export type TutorEvent =
   | { type: 'meta'; model: string; provider: 'gemini' | 'local' }
   | { type: 'delta'; text: string }
   | { type: 'notice'; code: string; message: string }
+  /** A settings change the tutor proposes; the user decides. */
+  | { type: 'action'; setting: string; value: string }
   | { type: 'done'; finishReason: FinishReason; usage?: TokenUsage }
   | { type: 'error'; code: string; message: string; retryable: boolean };
 
@@ -140,6 +142,8 @@ function parseTutorEvent({ event, data }: SSEEvent): TutorEvent | undefined {
       return { type: 'delta', text: text(payload.text) };
     case 'notice':
       return { type: 'notice', code: text(payload.code), message: text(payload.message) };
+    case 'action':
+      return { type: 'action', setting: text(payload.setting), value: text(payload.value) };
     case 'done':
       return {
         type: 'done',

@@ -98,6 +98,8 @@ interface Settings {
   // frontend (#266). Empty = no auth header (keyless local default).
   apiKey: string;
   fontSize: 'small' | 'default' | 'large';
+  /** How fast replies are read aloud; 1 is normal. */
+  voiceSpeed: number;
   defaultModel: string;
   defaultAgent: string;
   temperature: number;
@@ -115,6 +117,7 @@ function loadSettings(): Settings {
     apiUrl: '',
     apiKey: '',
     fontSize: 'default',
+    voiceSpeed: 1,
     defaultModel: '',
     defaultAgent: '',
     temperature: 0.7,

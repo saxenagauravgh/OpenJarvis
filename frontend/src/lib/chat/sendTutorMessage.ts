@@ -2,6 +2,7 @@ import { useAppStore, generateId } from '../store';
 import { streamTutorChat } from '../sse';
 import { fetchSavings } from '../api';
 import { buildTutorHistory } from './history';
+import { parseAction } from '../setting-actions';
 import type {
   ChatMessage,
   FinishReason,
@@ -195,6 +196,9 @@ async function streamReply(
       } else if (event.type === 'notice') {
         notices.push({ code: event.code, message: event.message });
         store.patchMessage(convId, reply.id, { content, notices: [...notices] });
+      } else if (event.type === 'action') {
+        const action = parseAction(event.setting, event.value);
+        if (action) store.patchMessage(convId, reply.id, { content, action });
       } else if (event.type === 'done') {
         finishReason = event.finishReason;
         usage = event.usage;

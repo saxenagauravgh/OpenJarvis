@@ -14,6 +14,7 @@ import { Toaster } from './components/ui/sonner';
 import { useAppStore } from './lib/store';
 import { fetchModels, fetchServerInfo, fetchSavings, isTauri } from './lib/api';
 import { AgeGate } from './components/AgeGate';
+import { setSpeechSpeed } from './lib/tts';
 import { track, hashId } from './lib/analytics';
 
 export default function App() {
@@ -48,6 +49,16 @@ export default function App() {
     // HUD is a dark theme with extra styling layered on top.
     else if (settings.theme === 'hud') root.classList.add('dark', 'hud');
   }, [settings.theme]);
+
+  // Text size scales the whole interface (sizes are in rem).
+  useEffect(() => {
+    const sizes = { small: '14px', default: '', large: '18px' };
+    document.documentElement.style.fontSize = sizes[settings.fontSize] ?? '';
+  }, [settings.fontSize]);
+
+  useEffect(() => {
+    setSpeechSpeed(settings.voiceSpeed);
+  }, [settings.voiceSpeed]);
 
   // Sync overlay conversations into the main app
   const importOverlay = useAppStore((s) => s.importOverlayConversation);

@@ -116,7 +116,9 @@ class FasterWhisperBackend(SpeechBackend):
                 with tmp:
                     tmp.write(audio)
 
-                kwargs = {}
+                # Skip silence and noise, which Whisper otherwise "hears" as
+                # invented words.
+                kwargs = {"vad_filter": True}
                 if language:
                     kwargs["language"] = language
 

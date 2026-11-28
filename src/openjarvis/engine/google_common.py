@@ -359,6 +359,24 @@ class GeminiEvent:
     text: str = ""
     finish_reason: Optional[str] = None
     usage: Optional[Dict[str, int]] = None
+    #: A function the model asked to call: ``{"name": ..., "args": {...}}``.
+    call: Optional[Dict[str, Any]] = None
+
+
+def chunk_calls(response: Any) -> List[Dict[str, Any]]:
+    """Function calls contained in a response chunk."""
+    candidates = getattr(response, "candidates", None)
+    content = getattr(candidates[0], "content", None) if candidates else None
+    calls = []
+    for part in getattr(content, "parts", None) or []:
+        call = getattr(part, "function_call", None)
+        name = getattr(call, "name", None)
+        if isinstance(name, str) and name:
+            args = getattr(call, "args", None)
+            calls.append(
+                {"name": name, "args": dict(args) if isinstance(args, dict) else {}}
+            )
+    return calls
 
 
 async def stream_text(
@@ -369,6 +387,7 @@ async def stream_text(
     max_tokens: int,
     allow_fallback: bool = True,
     idle_timeout: Optional[float] = None,
+    functions: Optional[List[Dict[str, Any]]] = None,
 ) -> AsyncIterator[GeminiEvent]:
     """Stream a text answer with a fresh client and the key current right now.
 
@@ -387,6 +406,8 @@ async def stream_text(
         max_output_tokens=max_tokens,
         system_instruction=system_instruction,
     )
+    if functions:
+        config.tools = [{"function_declarations": functions}]
     client = create_client(api_key)
     chunks = open_stream(client, model, contents, config, allow_fallback=allow_fallback)
     finish_reason: Optional[str] = None
@@ -402,6 +423,9 @@ async def stream_text(
             text = chunk_text(chunk)
             if text:
                 yield GeminiEvent(text=text)
+            if functions:
+                for call in chunk_calls(chunk):
+                    yield GeminiEvent(call=call)
         yield GeminiEvent(finish_reason=finish_reason or "stop", usage=usage)
     finally:
         await chunks.aclose()

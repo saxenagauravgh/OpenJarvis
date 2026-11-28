@@ -13,6 +13,7 @@ import { rehypeCitations } from '../../lib/rehype-citations';
 import { XRayFooter } from './XRayFooter';
 import { SpeakMessageButton } from './SpeakMessageButton';
 import { MessageError, MessageNotices, MessageOutcome } from './MessageStatus';
+import { SettingActionCard } from './SettingActionCard';
 import type { ChatMessage } from '../../types';
 import { normalizeMathDelimiters, stripThinkTags } from '../../lib/message-text';
 
@@ -206,6 +207,7 @@ export function MessageBubble({ message, isLive = false, onRetry, onContinue }: 
         </div>
       )}
 
+      {message.action && <SettingActionCard message={message} />}
       {message.error && (
         <MessageError
           error={message.error}

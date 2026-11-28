@@ -49,6 +49,12 @@ let token = 0;
 let healthProbe: Promise<void> | null = null;
 let captionFrame = 0;
 let activeSource: SpeechSource | null = null;
+let speechSpeed = 1;
+
+/** Set how fast replies are spoken (1 is normal). */
+export function setSpeechSpeed(speed: number): void {
+  speechSpeed = Number.isFinite(speed) && speed > 0 ? speed : 1;
+}
 
 function stopCaptions(): void {
   if (captionFrame && typeof cancelAnimationFrame === 'function') {
@@ -204,7 +210,10 @@ async function playSource(id: string, source: SpeechSource): Promise<void> {
   const fetchPiece = async (): Promise<Piece | null> => {
     const text = await source.next();
     if (text === null || mine !== token) return null;
-    const request = browser ? null : synthesizeSpeech(text, { signal: ac.signal });
+    const speed = speechSpeed === 1 ? undefined : speechSpeed;
+    const request = browser
+      ? null
+      : synthesizeSpeech(text, { signal: ac.signal, ...(speed ? { speed } : {}) });
     request?.catch(() => {}); // awaited later; must not count as unhandled
     return { text, audio: request };
   };
@@ -216,6 +225,7 @@ async function playSource(id: string, source: SpeechSource): Promise<void> {
 
   const speakWithBrowser = (synth: SpeechSynthesis, spoken: string) => {
     const utterance = new SpeechSynthesisUtterance(spoken);
+    utterance.rate = speechSpeed;
     const hindi = /[\u0900-\u097F]/.test(spoken)
       ? synth.getVoices().find((v) => v.lang?.toLowerCase().startsWith('hi'))
       : undefined;

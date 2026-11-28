@@ -40,7 +40,7 @@ from openjarvis.core.types import (
     TelemetryRecord,
 )
 from openjarvis.engine import google_common
-from openjarvis.server import cloud_router
+from openjarvis.server import cloud_router, tutor_settings
 from openjarvis.server.origin import require_trusted_origin
 from openjarvis.server.routes import (
     _ensure_identity_prompt,
@@ -235,6 +235,7 @@ async def _attempt(
             max_tokens=TUTOR_MAX_OUTPUT_TOKENS,
             allow_fallback=False,
             idle_timeout=GEMINI_IDLE_TIMEOUT_SECONDS,
+            functions=[tutor_settings.declaration()],
         )
     else:
         from openjarvis.engine.ollama import _default_num_ctx
@@ -385,6 +386,16 @@ async def _tutor_events(
         try:
             async with aclosing(_attempt(candidate, messages, sees_images)) as events:
                 async for event in events:
+                    call = getattr(event, "call", None)
+                    if call and call["name"] == tutor_settings.TOOL_NAME:
+                        action = tutor_settings.validate(call["args"])
+                        if action:
+                            yield _sse("action", action)
+                        spoken = tutor_settings.reply_for(action)
+                        if answer:
+                            spoken = f"\n\n{spoken}"
+                        answer.append(spoken)
+                        yield _sse("delta", {"text": spoken})
                     if event.text:
                         if not answer:
                             first_token_at = time.time()

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import json
+import types
 from typing import Any
 
 import pytest
@@ -269,7 +270,27 @@ def test_length_finish_reason_and_server_defaults(client, gemini, ollama):
     config = gemini.calls[0]["config"]
     assert config.max_output_tokens == 8192
     assert config.temperature == pytest.approx(0.3)
-    assert not config.tools
+    # No agent tools: only the proposal of an app settings change.
+    declared = [
+        d["name"] for tool in config.tools for d in tool["function_declarations"]
+    ]
+    assert declared == ["change_app_setting"]
+
+
+def test_settings_request_becomes_a_proposal_to_confirm(client, gemini, ollama):
+    call = types.SimpleNamespace(
+        name="change_app_setting", args={"setting": "theme", "value": "light"}
+    )
+    part = types.SimpleNamespace(text=None, function_call=call, thought=None)
+    response = chunk(finish="STOP")
+    response.candidates[0].content = types.SimpleNamespace(parts=[part])
+    gemini.scripts[MODEL] = [response]
+
+    events = ask(client)
+
+    assert names(events) == ["meta", "action", "delta", "done"]
+    assert events[1][1] == {"setting": "theme", "value": "light"}
+    assert "Press Apply" in events[2][1]["text"]
 
 
 def test_blocked_reply_without_text_is_done_blocked(client, gemini, ollama):

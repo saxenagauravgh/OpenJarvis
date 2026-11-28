@@ -146,9 +146,19 @@ export interface ChatMessage {
   attachments?: string[];
   error?: MessageError;
   notices?: MessageNotice[];
+  /** A settings change proposed with this reply. */
+  action?: SettingAction;
   finishReason?: FinishReason;
   /** The user stopped generation. */
   stopped?: boolean;
+}
+
+export interface SettingAction {
+  setting: 'theme' | 'font_size' | 'voice_speed' | 'model';
+  value: string;
+  status: 'proposed' | 'applied' | 'dismissed';
+  /** What the setting was before it was applied, for Undo. */
+  previous?: string;
 }
 
 export interface Conversation {
