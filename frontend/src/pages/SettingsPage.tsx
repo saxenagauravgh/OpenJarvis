@@ -827,6 +827,18 @@ export function SettingsPage() {
 
           {/* Speech */}
           <Section title="Speech">
+            <SettingRow label="Talk voice" description="Live sends your microphone audio to Google while Talk is on">
+              <select
+                aria-label="Talk voice"
+                value={settings.talkVoice}
+                onChange={(e) => { updateSettings({ talkVoice: e.target.value as 'live' | 'standard' }); showSaved(); }}
+                className="text-sm px-3 py-1.5 rounded-lg outline-none cursor-pointer"
+                style={{ background: 'var(--color-bg-secondary)', color: 'var(--color-text)', border: '1px solid var(--color-border)' }}
+              >
+                <option value="live">Live (Google, natural)</option>
+                <option value="standard">Standard (Rishi, Mac)</option>
+              </select>
+            </SettingRow>
             <SettingRow label="Speech-to-Text" description="Enable microphone input for voice dictation">
               <button
                 onClick={() => { updateSettings({ speechEnabled: !settings.speechEnabled }); showSaved(); }}

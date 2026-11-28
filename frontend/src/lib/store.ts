@@ -107,6 +107,8 @@ interface Settings {
   temperature: number;
   maxTokens: number;
   speechEnabled: boolean;
+  /** What the Talk button uses: Google's live voice, or the Mac's own. */
+  talkVoice: 'live' | 'standard';
   voiceOutputEnabled: boolean;
   voiceAutoplay: boolean;
   // IANA time zone for dates in answers; '' = this device's zone.
@@ -126,6 +128,7 @@ function loadSettings(): Settings {
     temperature: 0.7,
     maxTokens: 4096,
     speechEnabled: false,
+    talkVoice: 'live',
     voiceOutputEnabled: false,
     voiceAutoplay: false,
     timeZone: '',
@@ -142,6 +145,9 @@ function loadSettings(): Settings {
 function saveSettings(settings: Settings): void {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
 }
+
+const titleFrom = (content: string) =>
+  content.slice(0, 50) + (content.length > 50 ? '...' : '');
 
 /** The model the user last chose, or '' if they never chose one. */
 function loadSavedModel(): string {
@@ -207,7 +213,8 @@ interface AppState {
   selectConversation: (id: string) => void;
   deleteConversation: (id: string) => void;
   loadMessages: (conversationId: string | null) => void;
-  addMessage: (conversationId: string, message: ChatMessage) => void;
+  /** Append a message, or insert it before the message with id `beforeId`. */
+  addMessage: (conversationId: string, message: ChatMessage, beforeId?: string) => void;
   updateLastAssistant: (
     conversationId: string,
     content: string,
@@ -458,16 +465,16 @@ export const useAppStore = create<AppState>((set, get) => {
       set({ messages: conv ? conv.messages : [] });
     },
 
-    addMessage: (conversationId: string, message: ChatMessage) => {
+    addMessage: (conversationId: string, message: ChatMessage, beforeId?: string) => {
       const store = loadConversations();
       const conv = store.conversations[conversationId];
       if (!conv) return;
-      conv.messages.push(message);
+      const at = beforeId ? conv.messages.findIndex((m) => m.id === beforeId) : -1;
+      if (at === -1) conv.messages.push(message);
+      else conv.messages.splice(at, 0, message);
       conv.updatedAt = Date.now();
       if (message.role === 'user' && conv.title === 'New chat') {
-        conv.title =
-          message.content.slice(0, 50) +
-          (message.content.length > 50 ? '...' : '');
+        conv.title = titleFrom(message.content);
       }
       saveConversations(store);
       const conversations = Object.values(store.conversations).sort(
@@ -513,7 +520,14 @@ export const useAppStore = create<AppState>((set, get) => {
     patchMessage: (conversationId, messageId, patch) => {
       editConversation(conversationId, (conv) => {
         const message = conv.messages.find((m) => m.id === messageId);
-        if (message) Object.assign(message, patch);
+        if (!message) return;
+        // A title taken from a message still being heard follows it.
+        const retitle =
+          message.role === 'user' &&
+          patch.content !== undefined &&
+          conv.title === titleFrom(message.content);
+        Object.assign(message, patch);
+        if (retitle) conv.title = titleFrom(message.content);
       });
     },
 

@@ -162,6 +162,8 @@ export interface ChatMessage {
   finishReason?: FinishReason;
   /** The user stopped generation. */
   stopped?: boolean;
+  /** Said or typed in a live voice session; never read aloud again by the app. */
+  live?: boolean;
 }
 
 export interface SettingAction {

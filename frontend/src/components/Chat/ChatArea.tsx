@@ -73,7 +73,8 @@ export function ChatArea() {
       liveSpeechRef.current = null;
     }
     if (!speakReplies || !isCurrentChatStreaming || !streamState.content) return;
-    if (!last || last.role !== 'assistant') return;
+    // Live voice replies are already spoken by the live session.
+    if (!last || last.role !== 'assistant' || last.live) return;
     const content = stripThinkTags(streamState.content);
     if (liveSpeechRef.current) {
       liveSpeechRef.current.update(content);
@@ -105,7 +106,7 @@ export function ChatArea() {
     if (!justFinished) return;
     if (!speakReplies) return;
 
-    if (!last || last.role !== 'assistant' || activeId === null) return;
+    if (!last || last.role !== 'assistant' || last.live || activeId === null) return;
 
     // Model loading may still be in flight when a fast reply completes. Wait
     // for the probe, then confirm that this is still the active finished reply.
