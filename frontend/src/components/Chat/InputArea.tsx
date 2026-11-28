@@ -8,7 +8,7 @@ import { isSpeakableReply } from '../../lib/chat/history';
 import { listConnectors, getSyncStatus } from '../../lib/connectors-api';
 import { resolveChatEngine } from '../../lib/chat-telemetry';
 import { MicButton } from './MicButton';
-import type { OrbState } from './VoiceOrb';
+import { VoiceOrb, type OrbState } from './VoiceOrb';
 import { isEcho } from '../../lib/voice-detector';
 import { useSpeech } from '../../hooks/useSpeech';
 import { useTtsStore } from '../../lib/tts';
@@ -670,14 +670,6 @@ export function InputArea() {
         : streamState.isStreaming || conversationPhase === 'waiting'
           ? 'thinking'
           : 'idle';
-  const setVoiceOrbState = useAppStore((s) => s.setVoiceOrbState);
-  useEffect(() => {
-    setVoiceOrbState(orbState);
-  }, [orbState, setVoiceOrbState]);
-  const setUserSpeaking = useAppStore((s) => s.setUserSpeaking);
-  useEffect(() => {
-    setUserSpeaking(hearing);
-  }, [hearing, setUserSpeaking]);
 
   const conversationLabel = !conversationMode
     ? 'Talk'
@@ -737,6 +729,16 @@ export function InputArea() {
             <AudioLines size={12} className={conversationMode ? 'animate-pulse' : undefined} />
             {conversationLabel}
           </button>
+          {/* A small orb at the end of this row, while voice is in use. */}
+          {(conversationMode || ttsState !== 'idle') && (
+            <div className="voice-orb-compact ml-auto">
+              <VoiceOrb
+                state={conversationMode ? orbState : 'speaking'}
+                size={52}
+                hearing={hearing}
+              />
+            </div>
+          )}
         </div>
         {attachedImages.length > 0 && (
           <div className="flex flex-wrap gap-2 pt-1">

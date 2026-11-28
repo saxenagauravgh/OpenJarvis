@@ -1,7 +1,7 @@
 /** Find, in the displayed answer, the word that is currently being spoken. */
 
 export const normalizeWord = (word: string) =>
-  word.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+  word.toLowerCase().replace(/[^\p{L}\p{M}\p{N}]/gu, '');
 
 /**
  * Index in `shown` of the spoken word `spoken[at]`, or -1. The two differ where

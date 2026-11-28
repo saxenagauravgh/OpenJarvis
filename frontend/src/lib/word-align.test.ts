@@ -24,3 +24,11 @@ describe('locateWord', () => {
     expect(locateWord(shown, words('zebra'), 0, 0)).toBe(-1);
   });
 });
+
+describe('Devanagari words', () => {
+  it('keeps vowel signs so Hindi words still match', () => {
+    const hindi = words('यह जड़त्व का नियम है');
+    expect(hindi[4]).toBe('है');
+    expect(locateWord(hindi, hindi, 3, 0)).toBe(3);
+  });
+});

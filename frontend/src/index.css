@@ -963,18 +963,15 @@
 .hud ::-webkit-scrollbar-thumb { background: rgba(56, 220, 255, 0.25); border-radius: 4px; }
 .hud .katex { color: #e6fbff; }
 
-/* Orb column beside the chat during a voice conversation */
-.voice-dock {
-  flex: 0 0 176px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  border-left: 1px solid var(--color-border);
-  background: var(--color-sidebar);
+/* Compact orb in the row above the message box */
+.voice-orb-compact .voice-orb-wrap {
+  flex-direction: row-reverse;
+  gap: 10px;
+  padding: 0;
 }
-.voice-dock .voice-orb-status {
-  text-align: center;
+.voice-orb-compact .voice-orb-status {
+  font-size: 10px;
+  letter-spacing: 0.16em;
 }
 
 /* The sentence and word being read aloud, painted over the answer itself.

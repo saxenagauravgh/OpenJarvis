@@ -104,17 +104,6 @@ function preferredVoice(voices: SpeechSynthesisVoice[]): SpeechSynthesisVoice | 
   return matches.find((v) => /enhanced|premium/i.test(v.name)) ?? matches[0];
 }
 
-/** The voice list can arrive a moment after the page loads. */
-function loadedVoices(synth: SpeechSynthesis): Promise<SpeechSynthesisVoice[]> {
-  const now = synth.getVoices?.() ?? [];
-  if (now.length || !synth.addEventListener) return Promise.resolve(now);
-  return new Promise((resolve) => {
-    const done = () => resolve(synth.getVoices());
-    synth.addEventListener('voiceschanged', done, { once: true });
-    setTimeout(done, 800);
-  });
-}
-
 /** Prefer the chosen voice, then Indian English, then any local English voice. */
 function pickBrowserVoice(synth: SpeechSynthesis): SpeechSynthesisVoice | null {
   const voices = synth.getVoices();
@@ -227,7 +216,10 @@ async function playSource(id: string, source: SpeechSource): Promise<void> {
 
   const speakWithBrowser = (synth: SpeechSynthesis, spoken: string) => {
     const utterance = new SpeechSynthesisUtterance(spoken);
-    const voice = pickBrowserVoice(synth);
+    const hindi = /[\u0900-\u097F]/.test(spoken)
+      ? synth.getVoices().find((v) => v.lang?.toLowerCase().startsWith('hi'))
+      : undefined;
+    const voice = hindi ?? pickBrowserVoice(synth);
     if (voice) {
       utterance.voice = voice;
       utterance.lang = voice.lang;
@@ -331,35 +323,19 @@ export const useTtsStore = create<TtsStore>((set, get) => ({
 
   ensureHealth: () => {
     if (healthProbe) return healthProbe;
-    const synth = browserSynth();
-    if (synth) {
-      healthProbe = loadedVoices(synth).then((voices) => {
-        if (preferredVoice(voices)) {
-          useBrowserVoice = true;
-          set({ available: true });
-          return;
-        }
-        return probeServer();
+    healthProbe = fetchTtsHealth()
+      .then((health) => {
+        // No server voice: speak with the OS voices instead, when present.
+        useBrowserVoice = !health.available && browserSynth() !== null;
+        set({ available: health.available || useBrowserVoice });
+        if (!health.available && !useBrowserVoice) healthProbe = null;
+      })
+      .catch(() => {
+        useBrowserVoice = browserSynth() !== null;
+        set({ available: useBrowserVoice });
+        if (!useBrowserVoice) healthProbe = null;
       });
-      return healthProbe;
-    }
-    healthProbe = probeServer();
     return healthProbe;
-
-    function probeServer(): Promise<void> {
-      return fetchTtsHealth()
-        .then((health) => {
-          // No server voice: speak with the OS voices instead, when present.
-          useBrowserVoice = !health.available && browserSynth() !== null;
-          set({ available: health.available || useBrowserVoice });
-          if (!health.available && !useBrowserVoice) healthProbe = null;
-        })
-        .catch(() => {
-          useBrowserVoice = browserSynth() !== null;
-          set({ available: useBrowserVoice });
-          if (!useBrowserVoice) healthProbe = null;
-        });
-    }
   },
 
   markAutoSpoken: (id: string) => set({ autoSpokenId: id }),

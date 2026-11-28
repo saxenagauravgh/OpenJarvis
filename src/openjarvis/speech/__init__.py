@@ -20,6 +20,7 @@ for _mod in (
     "elevenlabs_tts",
     "gemini_tts",
     "kokoro_tts",
+    "macos_say",
     "openai_tts",
 ):
     try:

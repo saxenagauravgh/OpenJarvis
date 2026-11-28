@@ -265,15 +265,3 @@ describe('splitForSpeech', () => {
     expect(chunks.join(' ')).toBe(long);
   });
 });
-
-describe('Mac voice', () => {
-  it('uses Rishi without asking the server when it is installed', async () => {
-    const voices = [{ name: 'Rishi', lang: 'en-IN', localService: true }];
-    vi.stubGlobal('window', { speechSynthesis: { getVoices: () => voices, cancel: () => {} } });
-    await useTtsStore.getState().ensureHealth();
-    expect(useTtsStore.getState().available).toBe(true);
-    expect(health).not.toHaveBeenCalled();
-    __resetTtsForTests();
-    vi.unstubAllGlobals();
-  });
-});

@@ -60,7 +60,7 @@ export function interruptDetector(calibrationMs = 700): VoiceDetector {
 
 /** True when a transcript is mostly Jarvis's own words picked up by the mic. */
 export function isEcho(heard: string, spoken: string): boolean {
-  const words = (text: string) => text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+  const words = (text: string) => text.toLowerCase().match(/[\p{L}\p{M}\p{N}]+/gu) ?? [];
   const mine = words(heard);
   if (mine.length < 3) return false;
   const theirs = new Set(words(spoken));

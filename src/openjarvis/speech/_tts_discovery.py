@@ -24,6 +24,7 @@ TTS_BACKEND_ORDER = ("kokoro", "gemini_tts", "openai_tts", "cartesia", "elevenla
 BACKEND_DEFAULT_VOICE = {
     "kokoro": "bm_george",  # British male
     "gemini_tts": "Sulafat",  # warm
+    "macos_say": "Rishi",  # Indian English
     "openai_tts": "onyx",  # deepest OpenAI preset
     "cartesia": "",  # no safe static default; let Cartesia choose
     "elevenlabs": "JBFqnCBsd6RMkjVDRZzb",  # "George", British male

@@ -16,7 +16,6 @@ import type {
 } from '../types';
 import type { ManagedAgent } from './api';
 import { DEFAULT_MODEL, isCloudModel, isEmbedOnlyModel } from './model-capabilities';
-import type { OrbState } from '../components/Chat/VoiceOrb';
 import { loadAdultConfirmation, saveAdultConfirmation } from './age-gate';
 import { serializeToolCallArguments } from './tool-call';
 
@@ -229,11 +228,6 @@ interface AppState {
   // Hands-free voice conversation (not persisted)
   conversationMode: boolean;
   setConversationMode: (on: boolean) => void;
-  /** What the voice conversation is doing, shown by the orb beside the chat. */
-  voiceOrbState: OrbState;
-  setVoiceOrbState: (state: OrbState) => void;
-  userSpeaking: boolean;
-  setUserSpeaking: (speaking: boolean) => void;
 
   // Actions: models & server
   setModels: (models: ModelInfo[]) => void;
@@ -538,10 +532,6 @@ export const useAppStore = create<AppState>((set, get) => {
     // ── Conversation mode ─────────────────────────────────────────
     conversationMode: false,
     setConversationMode: (on: boolean) => set({ conversationMode: on }),
-    voiceOrbState: 'idle',
-    setVoiceOrbState: (voiceOrbState: OrbState) => set({ voiceOrbState }),
-    userSpeaking: false,
-    setUserSpeaking: (userSpeaking: boolean) => set({ userSpeaking }),
 
     // ── Models & server ────────────────────────────────────────────
 
