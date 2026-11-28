@@ -55,10 +55,10 @@ export function WebPills() {
         disabled={!enabled}
         title={
           !enabled
-            ? 'Web search is turned off in Settings. It sends your question to a free search engine (DuckDuckGo, or Yahoo).'
+            ? 'Web search is turned off in Settings. It sends your question to free search engines (DuckDuckGo first).'
             : web
-              ? 'Web: on. Each typed question is sent to a free search engine (DuckDuckGo, or Yahoo).'
-              : 'Web: search for every typed question. This sends your question to a free search engine (DuckDuckGo, or Yahoo). While off, the tutor may still search when it needs to.'
+              ? 'Web: on. Each typed question is sent to free search engines (DuckDuckGo first).'
+              : 'Web: search for every typed question. This sends your question to free search engines (DuckDuckGo first). While off, the tutor may still search when it needs to.'
         }
         onClick={() => updateSettings({ webAlways: !webAlways })}
       />

@@ -1,4 +1,4 @@
-"""Free web search for the tutor: DuckDuckGo, then Yahoo; titles and snippets only.
+"""Free web search for the tutor: DuckDuckGo first; titles and snippets only.
 
 Only the search query leaves this computer, and no result page is ever fetched.
 Results are untrusted text, so they reach the model clearly delimited and
@@ -20,13 +20,13 @@ logger = logging.getLogger("openjarvis.server.tutor")
 
 TOOL_NAME = "web_search"
 # Tried in order: the next is used when one finds nothing or fails.
-ENGINES_IN_ORDER = ("duckduckgo", "yahoo")
+ENGINES_IN_ORDER = ("duckduckgo", "yahoo", "auto")  # "auto" tries several
 MAX_RESULTS = 5
 MAX_QUERY_CHARS = 300
 MAX_TITLE_CHARS = 200
 MAX_SNIPPET_CHARS = 500
 MAX_URL_CHARS = 1000
-SEARCH_TIMEOUT_SECONDS = 12.0
+SEARCH_TIMEOUT_SECONDS = 20.0
 _REQUEST_TIMEOUT_SECONDS = 8
 
 # Separate threads, so that a stuck search cannot hold up other background work.
@@ -114,7 +114,9 @@ def _run(query: str) -> list[dict[str, Any]]:
     from ddgs.engines import ENGINES
 
     # An unknown backend would make ddgs use every engine it has.
-    usable = [name for name in ENGINES_IN_ORDER if name in ENGINES["text"]]
+    usable = [
+        name for name in ENGINES_IN_ORDER if name == "auto" or name in ENGINES["text"]
+    ]
     if not usable:
         raise SearchError("No web search engine is available")
     failure: Exception | None = None
